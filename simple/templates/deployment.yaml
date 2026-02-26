@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-server-{{ .Values.env }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: agent-server
+      env: {{ .Values.env }}
+  template:
+    metadata:
+      labels:
+        app: agent-server
+        env: {{ .Values.env }}
+    spec:
+      securityContext:
+        fsGroup: {{ .Values.volume_gid }}
+      nodeSelector:
+        topology.kubernetes.io/zone: {{ .Values.ebs_volume.zone}}
+      containers:
+        - name: agent-server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          args: ["--host", {{ .Values.host }}, "--agent-cache-size", "{{ .Values.agent_cache_size }}", "--params-limit", "{{ .Values.agent_params_limit }}", "--jwks-url", "{{ .Values.auth_public_key_endpoint }}"]
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: server
+              protocol: TCP
+              containerPort: {{ .Values.service.ports.server.port }}
+          securityContext:
+            capabilities:
+              add: ["SYS_PTRACE"]
+          resources:
+            limits:
+              cpu: {{ .Values.service.limits.cpu }}
+              memory: {{ .Values.service.limits.memory }}
+            requests:
+              cpu: {{ .Values.service.requests.cpu }}
+              memory: {{ .Values.service.requests.memory }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.service.ports.server.port }}
+              scheme: HTTP
+            timeoutSeconds: 5
+            periodSeconds: 15
+          volumeMounts:
+            - mountPath: "/dbs"
+              name: agent-db-{{ .Values.env }}
+          env:
+            - name: WORKSPACE_CREATORS
+              value: "{{ .Values.workspace_creators }}"
+            - name: RMX_HOST
+              value: {{ .Values.host }}
+            - name: RUST_LOG
+              value: {{ .Values.log_level }}
+      volumes:
+        - name: agent-db-{{ .Values.env }}
+          persistentVolumeClaim:
+            claimName: agent-db-{{ .Values.env }}

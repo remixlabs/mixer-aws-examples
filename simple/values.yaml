@@ -1,0 +1,41 @@
+env: dev
+aws_region: us-west-2
+cluster_name: agents-cluster
+
+ebs_volume:
+  id: "" # e.g. vol-0abc1234def56789
+  zone: us-west-2b # zone the EBS volume is in, pods will be constrained to run here
+  size: "200Gi"
+
+# comma-separated list of subjects that can create new workspaces (eg, "user/{sub from JWT}" or "domain/example.com")
+workspace_creators: "user/U39JP0s5xZCtKw719mwba5xr6Ig7" # cvermilion's sub in qa-admin env
+#workspace_creators: "domain/remixlabs.com"
+# where the service is accessible from
+host: agt-dev.self.remixlabs.com
+auth_public_key_endpoint: "https://api.descope.com/v2/keys/P2k6P6vNwkCobWdchjV56I0t8c5N"
+#auth_public_key_endpoint: "https://auth.remixlabs.com/a/x/jwks.json"
+agent_cache_size: "1GiB"
+volume_gid: 33 # GID that will own the /dbs mount
+agent_params_limit: "10MiB"
+
+# adjust as needed
+log_level: "info"
+# more logging
+# log_level: "info,remix=debug,mixquery=debug,mixcore=debug,mixrun=debug,mixrun::timer=trace,mixer=debug,mix-vm=debug"
+image:
+  repository: 250233190882.dkr.ecr.us-east-1.amazonaws.com/mixer
+  pullPolicy: Always
+  tag: latest
+
+# Resource requests and port mapping
+service:
+  requests:
+    cpu: "1"
+    memory: "6Gi"
+  limits:
+    cpu: "2"
+    memory: "8Gi"
+  ports:
+    server:
+      port: 8000
+      targetPort: 8000
