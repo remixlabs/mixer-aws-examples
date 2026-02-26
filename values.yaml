@@ -1,0 +1,51 @@
+env: dev
+aws_region: us-west-2
+cluster_name: agents-cluster
+
+aws-load-balancer-controller:
+  clusterName: agents-cluster  # must match cluster_name above; set with --set aws-load-balancer-controller.clusterName=...
+  vpcId: vpc-0eacc8b97c1805063
+  region: us-west-2
+  serviceAccount:
+    create: true
+    name: aws-load-balancer-controller
+    annotations:
+      eks.amazonaws.com/role-arn: "arn:aws:iam::250233190882:role/AWSLoadBalancerControllerRole"  # ARN of the IRSA role for the controller
+
+# ARN of the ACM certificate for the ALB listener (filled in by CI or set manually)
+acm_certificate_arn: "acm_certificate_arn=arn:aws:acm:us-west-2:250233190882:certificate/30c030d7-ebde-48b8-920d-29fb5310a253"
+
+# comma-separated list of subjects that can create new workspaces (eg, "user/{sub from JWT}" or "domain/example.com")
+workspace_creators: "domain/remixlabs.com"
+# where the service is accessible from
+host: agt-dev.self.remixlabs.com
+# Example: Descope tenant JWKS public key endpoint
+auth_public_key_endpoint: "https://api.descope.com/v2/keys/P2k6P6vNwkCobWdchjV56I0t8c5N"
+# Remix auth server
+# auth_public_key_endpoint: "https://auth.remixlabs.com/a/x/jwks.json"
+
+agent_cache_size: "1GiB"
+agent_params_limit: "10MiB"
+
+# adjust as needed
+volume_size: "200Gi"
+log_level: "info"
+# more logging
+# log_level: "info,remix=debug,mixquery=debug,mixcore=debug,mixrun=debug,mixrun::timer=trace,mixer=debug,mix-vm=debug"
+image:
+  repository: 250233190882.dkr.ecr.us-east-1.amazonaws.com/mixer
+  pullPolicy: Always
+  tag: latest
+
+# Resource requests and port mapping
+service:
+  requests:
+    cpu: "1"
+    memory: "6Gi"
+  limits:
+    cpu: "2"
+    memory: "8Gi"
+  ports:
+    server:
+      port: 8000
+      targetPort: 8000

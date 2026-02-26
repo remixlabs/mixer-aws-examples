@@ -1,0 +1,245 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Cloud agent EKS cluster — EC2-backed with EBS CSI for persistent volumes"
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: agents-cluster
+  NodeInstanceType:
+    Type: String
+    Default: m6i.large
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+  Subdomain:
+    Type: String
+    Description: "Fully-qualified subdomain to issue the certificate for (e.g. api.example.com)"
+
+Resources:
+
+  # ── VPC ────────────────────────────────────────────────────────────────────
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  # Two subnets in different AZs — required by EKS
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.0.1.0/24"
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: kubernetes.io/role/elb
+          Value: "1"
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.0.2.0/24"
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: kubernetes.io/role/elb
+          Value: "1"
+
+  SubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  # ── IAM — Cluster ──────────────────────────────────────────────────────────
+
+  ClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  # ── IAM — Node group ───────────────────────────────────────────────────────
+
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+  # ── EKS Cluster ────────────────────────────────────────────────────────────
+
+  Cluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref ClusterName
+      RoleArn: !GetAtt ClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !Ref SubnetA
+          - !Ref SubnetB
+        EndpointPublicAccess: true
+        EndpointPrivateAccess: false
+      UpgradePolicy:
+        SupportType: STANDARD
+      Tags:
+        - Key: Description
+          Value: "cloud agent cluster"
+
+  # ── OIDC provider (enables IAM Roles for Service Accounts) ─────────────────
+  #
+  # AWS no longer validates the thumbprint for oidc.eks.*.amazonaws.com
+  # endpoints, but CloudFormation still requires the field to be non-empty.
+
+  OIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !GetAtt Cluster.OpenIdConnectIssuerUrl
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - "9e99a48a9960b14926bb7f3b02e22da2b0ab7280"
+
+  # ── IAM — EBS CSI driver (IRSA) ────────────────────────────────────────────
+  #
+  # Scoped to the ebs-csi-controller-sa service account so that only the CSI
+  # controller pod can call EC2 EBS APIs, not every pod on the node.
+
+  EBSCSIRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Principal": { "Federated": "${OIDCProviderArn}" },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "${OIDCIssuer}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa",
+                  "${OIDCIssuer}:aud": "sts.amazonaws.com"
+                }
+              }
+            }]
+          }
+        - OIDCProviderArn: !GetAtt OIDCProvider.Arn
+          OIDCIssuer: !Select [1, !Split ["//", !GetAtt Cluster.OpenIdConnectIssuerUrl]]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+
+  # ── EKS add-ons ────────────────────────────────────────────────────────────
+
+  EBSCSIAddon:
+    Type: AWS::EKS::Addon
+    Properties:
+      ClusterName: !Ref Cluster
+      AddonName: aws-ebs-csi-driver
+      ServiceAccountRoleArn: !GetAtt EBSCSIRole.Arn
+
+  # ── Managed node group ─────────────────────────────────────────────────────
+  #
+  # EC2 nodes are required for EBS — Fargate cannot attach EBS volumes.
+  # Nodes span both subnets; PersistentVolumes are AZ-local, so stateful pods
+  # are pinned to a specific AZ via the gp3 StorageClass (WaitForFirstConsumer)
+  # and the node affinity that EBS CSI injects automatically.
+
+  NodeGroup:
+    Type: AWS::EKS::Nodegroup
+    DependsOn: EBSCSIAddon
+    Properties:
+      ClusterName: !Ref Cluster
+      NodeRole: !GetAtt NodeRole.Arn
+      Subnets:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      InstanceTypes:
+        - !Ref NodeInstanceType
+      AmiType: AL2023_x86_64_STANDARD
+      DiskSize: 20
+      ScalingConfig:
+        MinSize: 1
+        MaxSize: 3
+        DesiredSize: 1
+
+  # ── TLS certificate ────────────────────────────────────────────────────────
+  #
+  # CloudFormation creates the Route 53 DNS validation record automatically
+  # and blocks stack progress until ACM confirms the certificate is issued.
+
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref Subdomain
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref Subdomain
+          HostedZoneId: !Ref HostedZoneId
+
+  # ── Static IP (analogous to GCP global static address) ────────────────────
+
+  StaticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: static-ip
+
+Outputs:
+  ClusterName:
+    Value: !Ref Cluster
+  ClusterEndpoint:
+    Value: !GetAtt Cluster.Endpoint
+  CertificateArn:
+    Value: !Ref Certificate
+  StaticIPAddress:
+    Value: !Ref StaticIP
