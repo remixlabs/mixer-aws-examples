@@ -3,7 +3,7 @@
   { "ParameterKey": "VpcId", "ParameterValue": "vpc-0123456789abcdef0" },
   { "ParameterKey": "SubnetOne", "ParameterValue": "subnet-0111111111111111a" },
   { "ParameterKey": "SubnetTwo", "ParameterValue": "subnet-0222222222222222b" },
-  { "ParameterKey": "VpcCidrBlock", "ParameterValue": "10.0.0.0/16" },
+  { "ParameterKey": "IngressCidr", "ParameterValue": "10.0.0.0/16" },
   { "ParameterKey": "AssignPublicIp", "ParameterValue": "DISABLED" },
   { "ParameterKey": "ClusterName", "ParameterValue": "agents-cluster" },
   { "ParameterKey": "ImageRepository", "ParameterValue": "250233190882.dkr.ecr.us-east-1.amazonaws.com/mixer" },

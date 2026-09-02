@@ -1,8 +1,7 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Runs the "mixer" server on ECS Fargate, with a persistent EFS-backed volume
-  mounted at /dbs for its custom database. Analogous to the eks-simple Helm
-  chart (Deployment + PVC/PV backed by EBS), but using ECS Fargate + EFS.
+  mounted at /dbs for its custom database.
 
 Parameters:
   Env:
@@ -22,9 +21,13 @@ Parameters:
     Type: AWS::EC2::Subnet::Id
     Description: Second subnet for the Fargate service and EFS mount target (use a different AZ than SubnetOne).
 
-  VpcCidrBlock:
+  IngressCidr:
     Type: String
-    Description: CIDR block of the VPC above, used to scope security group ingress to in-VPC traffic.
+    Description: >
+      CIDR allowed to reach the service on ContainerPort. Use the VPC's CIDR
+      for internal-only access (matching the chart's ClusterIP Service), or
+      your own IP in /32 form (e.g. 203.0.113.7/32) for direct testing with
+      AssignPublicIp=ENABLED.
     Default: 10.0.0.0/16
 
   AssignPublicIp:
@@ -54,12 +57,12 @@ Parameters:
   TaskCpu:
     Type: String
     Default: "2048"
-    Description: Task-level vCPU units (Fargate has no separate request/limit; this is the hard cap, matching the chart's service.limits.cpu).
+    Description: Task-level vCPU units (hard cap)
 
   TaskMemory:
     Type: String
     Default: "8192"
-    Description: Task-level memory in MiB (matches the chart's service.limits.memory of 8Gi).
+    Description: Task-level memory in MiB (hard cap)
 
   Host:
     Type: String
@@ -88,7 +91,7 @@ Parameters:
   VolumeGid:
     Type: Number
     Default: 33
-    Description: GID that owns the /dbs mount, via the EFS access point's root directory (analogous to the chart's fsGroup).
+    Description: GID that owns the /dbs mount, via the EFS access point's root directory
 
   LogRetentionDays:
     Type: Number
@@ -105,7 +108,7 @@ Resources:
         - IpProtocol: tcp
           FromPort: !Ref ContainerPort
           ToPort: !Ref ContainerPort
-          CidrIp: !Ref VpcCidrBlock
+          CidrIp: !Ref IngressCidr
       SecurityGroupEgress:
         - IpProtocol: "-1"
           CidrIp: 0.0.0.0/0
@@ -209,12 +212,12 @@ Resources:
                   - elasticfilesystem:ClientMount
                   - elasticfilesystem:ClientWrite
                   - elasticfilesystem:ClientRootAccess
-                Resource: !GetAtt AgentDbFileSystem.Arn
+                Resource: !Sub "arn:${AWS::Partition}:elasticfilesystem:${AWS::Region}:${AWS::AccountId}:file-system/${AgentDbFileSystem}"
                 Condition:
                   StringEquals:
-                    elasticfilesystem:AccessPointArn: !GetAtt AgentDbAccessPoint.Arn
+                    elasticfilesystem:AccessPointArn: !Sub "arn:${AWS::Partition}:elasticfilesystem:${AWS::Region}:${AWS::AccountId}:access-point/${AgentDbAccessPoint}"
 
-  # ---------- Compute (analogous to deployment.yaml) ----------
+  # ---------- Compute ----------
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -262,14 +265,6 @@ Resources:
           MountPoints:
             - SourceVolume: agent-db
               ContainerPath: /dbs
-          HealthCheck:
-            Command:
-              - CMD-SHELL
-              - !Sub "curl -f http://localhost:${ContainerPort}/ || exit 1"
-            Interval: 15
-            Timeout: 5
-            Retries: 3
-            StartPeriod: 30
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -282,7 +277,7 @@ Resources:
     Properties:
       ClusterName: !Ref ClusterName
 
-  # ---------- Service (analogous to service.yaml's ClusterIP Service) ----------
+  # ---------- Service ----------
   Service:
     Type: AWS::ECS::Service
     DependsOn:
