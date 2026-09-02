@@ -1,6 +1,6 @@
-# mixer-eks-example
+# mixer-aws-examples
 
-An example configuration to deploy the mixer service in EKS.
+Examples configurations to self-host Remix Server in AWS.
 
 The overall Remix platform documentation is on our [Notion
 page](https://curious-turnover-84b.notion.site). There is a page for this
@@ -42,9 +42,18 @@ The repo also includes:
 The `mixer` Docker image is available in a private AWS ECR repository, at
 `250233190882.dkr.ecr.us-east-1.amazonaws.com/mixer`. There are amd64 and arm64
 versions available. Each has a series of releases tagged with a build number
-(current latest: `10007` and `10007-arm64`). You can configure the release to
+(current latest: `12350` and `12350-arm64`). You can configure the release to
 either pin to a particular build, or use the mutable `latest`/`latest-arm64`
 tags.
 
 You will need to be granted access to that image; we can do that with the ARN of
 an AWS IAM role that will pull it, or contact us for alternative approaches.
+
+## Other deployment targets
+
+- `eks-simple/`: a minimal Helm chart (Deployment + Service + PVC only, no
+  ingress) for running the service on an existing EKS cluster.
+- `ecs-fargate/`: a CloudFormation template for running the service on ECS
+  Fargate instead of Kubernetes, for customers who don't run EKS. Storage
+  uses EFS rather than EBS; see `ecs-fargate/README.md` for the full mapping
+  from the Helm chart's resources.

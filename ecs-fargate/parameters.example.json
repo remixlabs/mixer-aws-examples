@@ -1,0 +1,22 @@
+[
+  { "ParameterKey": "Env", "ParameterValue": "dev" },
+  { "ParameterKey": "VpcId", "ParameterValue": "vpc-0123456789abcdef0" },
+  { "ParameterKey": "SubnetOne", "ParameterValue": "subnet-0111111111111111a" },
+  { "ParameterKey": "SubnetTwo", "ParameterValue": "subnet-0222222222222222b" },
+  { "ParameterKey": "IngressCidr", "ParameterValue": "10.0.0.0/16" },
+  { "ParameterKey": "AssignPublicIp", "ParameterValue": "DISABLED" },
+  { "ParameterKey": "ClusterName", "ParameterValue": "agents-cluster" },
+  { "ParameterKey": "ImageRepository", "ParameterValue": "250233190882.dkr.ecr.us-east-1.amazonaws.com/mixer" },
+  { "ParameterKey": "ImageTag", "ParameterValue": "latest" },
+  { "ParameterKey": "ContainerPort", "ParameterValue": "8000" },
+  { "ParameterKey": "TaskCpu", "ParameterValue": "2048" },
+  { "ParameterKey": "TaskMemory", "ParameterValue": "8192" },
+  { "ParameterKey": "Host", "ParameterValue": "agt-dev.self.remixlabs.com" },
+  { "ParameterKey": "WorkspaceCreators", "ParameterValue": "user/chris@remixlabs.com" },
+  { "ParameterKey": "AuthPublicKeyEndpoint", "ParameterValue": "https://auth.remixlabs.com/a/x/jwks.json" },
+  { "ParameterKey": "AgentCacheSize", "ParameterValue": "1GiB" },
+  { "ParameterKey": "AgentParamsLimit", "ParameterValue": "10MiB" },
+  { "ParameterKey": "LogLevel", "ParameterValue": "info" },
+  { "ParameterKey": "VolumeGid", "ParameterValue": "33" },
+  { "ParameterKey": "LogRetentionDays", "ParameterValue": "30" }
+]
