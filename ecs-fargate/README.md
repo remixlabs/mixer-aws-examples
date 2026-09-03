@@ -1,7 +1,7 @@
 # ecs-fargate
 
-CloudFormation analog of `../eks-simple`: runs the `mixer` server on ECS
-Fargate with a persistent volume mounted at `/dbs` for its custom database.
+This directory shows an example of deploying Remix Server in an ECS Fargate
+cluster, using an EFS volume for the database disk.
 
 Whereas deploying to EKS can use generic Kubernetes tooling like Helm, ECS is
 its own beast, so the example here is an AWS-specific CloudFormation template.
