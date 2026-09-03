@@ -1,43 +1,75 @@
 # mixer-aws-examples
 
-Examples configurations to self-host Remix Server in AWS.
+This repository explains how to self-host Remix Server and provides example
+configurations for deploying to AWS EKS and ECS.
 
 The overall Remix platform documentation is on our [Notion
 page](https://curious-turnover-84b.notion.site). There is a page for this
 [service
 specifically](https://curious-turnover-84b.notion.site/Cloud-Agent-Server-1061d464528f80f18e46dd27895aeda2),
-but for usage the best thing is probably the [deployed Swagger
+but for API usage, the best thing is probably the [deployed Swagger
 docs](https://agt.remixlabs.com/v1/swagger/#/).
 
-This repo contains a Helm chart for deploying the service, as well as an example
-EKS CloudFormation template in `cluster.yaml` that we've used to test it.
+## Remix Server overview
 
-The Helm chart includes:
+Remix Server's deployment footprint is simple: it's a single-node server defined
+by a Docker image, which requires an attached persistent disk to store its
+built-in custom database. Once these are created and provided appropriate
+resources, the service itself can be managed from Remix Desktop.
 
-- `templates/service.yaml`: the basic Kubernetes service, including a port
-  mapping
-- `templates/deployment.yaml`: the actual spec for the single managed pod,
-  including the environment variables for configuring it
-- `templates/pvc.yaml`: a PersistentVolumeClaim spec for a managed EBS volume,
-  which the service's pod mounts as a database volume. Other means of attaching
-  a persistent volume would be fine, as long as they can be configured to live
-  longer than the pods themselves.
-- `templates/ingress.yaml`: an ALB ingress configuration, intended to be used
-  alongside an ACM managed certificate for TLS. A managed cert is defined in
-  the example cluster template, but you still need to wire up DNS for it to
-  work. (That is, create the Helm release, get the endpoint for the ALB, then
-  CNAME whatever public (sub)domain you want to that.) This is for a publicly
-  exposed server; for internal-only access, other configurations are possible.
-- `values.yaml`: defines default values for a variety of configuration
-  parameters affecting the service at runtime
+The server provides its own authentication mechanisms, and can also serve as the
+authentication server for Remix Desktop. Any identity provider that defines an
+OAuth integration can be used, and access control to Remix resources is managed
+within the server itself. Service authentication is bootstrapped by using the
+desktop app to generate a key pair, and providing the public key to the server
+environment. The desktop app can can authenticate and set up the identity
+provider for OAuth sign-in.
 
-The repo also includes:
+Remix Server can be deployed into any cloud infrastructure that can run Docker
+containers and provide a persistent disk: EKS or ECS in AWS, GCP's GKE, etc. We
+also have a configuration that runs in Snowflake's
+[Snowpark](https://www.snowflake.com/en/product/features/snowpark/) Container
+Services environment.
 
-- `cluster.yaml`: a CloudFormation template defining an EKS cluster and
-  associated resources, as an example of an environment where you might run the
-  service
+## Example configurations
 
-## The actual Docker image
+Here are three example deployment configurations; which is most useful will
+depend on your existing infrastructure. ECS is the simplest to get up and
+running and requires the fewest prerequisites and configuration.
+
+The ECS configuration is provided as a CloudFormation template, while the EKS
+examples are Helm charts (which could be straightforwardly ported to other
+Kubernetes environments).
+
+[ecs-fargate](ecs-fargate/README.md) provides a CloudFormation template for a
+complete ECS deployment, including the cluster definition, management roles,
+etc. So far, only direct public-IP (from a specified ingress IP) is documented
+as a mechanism of exposure.
+
+[eks-full](eks-full/README.md) provides a complete EKS example configuration,
+including a load balancer, cluster definition, load balancer, ingress rules,
+etc.
+
+[eks-simple](eks-eimple/README.md) is a stripped-down version that assumes you
+already have a cluster and want to work out the networking yourself. It just
+includes the service and deployment definitions, plus a persistent volume claim
+for the database disk.
+
+### Snowflake Snowpark
+
+Contact us for more information about running Remix Server in Snowpark. For that
+environment, we can provide privately listed Snowflake Marketplace app that
+installs Remix Server directly into your Snowflake account, so that the service
+runs entirely within your Snowflake trust boundary, alongside your data. Remix
+Desktop can connect to the workspace server via a Snowflake OAuth integration.
+
+If you want to use Remix with Snowflake without running the server in Snowpark,
+this is also possible via a typical OAuth connection between Remix Server and
+Snowflake. Running Remix server in your own cloud environment will likely be
+lower-cost and give you more control, but require greater configuration and
+admin overhead.
+
+## The Remix Server Docker image
 
 The `mixer` Docker image is available in a private AWS ECR repository, at
 `250233190882.dkr.ecr.us-east-1.amazonaws.com/mixer`. There are amd64 and arm64
@@ -47,13 +79,6 @@ either pin to a particular build, or use the mutable `latest`/`latest-arm64`
 tags.
 
 You will need to be granted access to that image; we can do that with the ARN of
-an AWS IAM role that will pull it, or contact us for alternative approaches.
+an AWS IAM role or account that will pull it, or contact us for alternative
+approaches.
 
-## Other deployment targets
-
-- `eks-simple/`: a minimal Helm chart (Deployment + Service + PVC only, no
-  ingress) for running the service on an existing EKS cluster.
-- `ecs-fargate/`: a CloudFormation template for running the service on ECS
-  Fargate instead of Kubernetes, for customers who don't run EKS. Storage
-  uses EFS rather than EBS; see `ecs-fargate/README.md` for the full mapping
-  from the Helm chart's resources.
