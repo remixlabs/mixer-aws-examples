@@ -1,0 +1,339 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Runs the "mixer" server on ECS Fargate, with a persistent EFS-backed volume
+  mounted at /dbs for its custom database. This variant assumes access is via
+  an existing AWS Client VPN endpoint rather than a public IP or SSM tunnel —
+  see the README for what's different from ../ecs-fargate.
+
+Parameters:
+  Env:
+    Type: String
+    Default: dev
+    Description: Environment name, used to namespace resources (e.g. dev, staging, prod).
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy into. Must be the VPC the Client VPN endpoint is already associated with.
+
+  SubnetOne:
+    Type: AWS::EC2::Subnet::Id
+    Description: First subnet for the Fargate service and EFS mount target (use a different AZ than SubnetTwo).
+
+  SubnetTwo:
+    Type: AWS::EC2::Subnet::Id
+    Description: Second subnet for the Fargate service and EFS mount target (use a different AZ than SubnetOne).
+
+  ClientVpnTargetSubnetCidrOne:
+    Type: String
+    Description: >
+      CIDR block of the first subnet the Client VPN endpoint is associated
+      with (a target-network association, not necessarily SubnetOne/SubnetTwo
+      above). In practice, against a real endpoint, Client VPN traffic
+      arrives at the task NAT'd to an address in this subnet's range, not
+      from the VPN's client CIDR block — this is the range the task's
+      security group must trust. Find the associated subnet IDs with `aws
+      ec2 describe-client-vpn-target-networks --client-vpn-endpoint-id
+      <id>`, then look up each one's CIDR with `aws ec2 describe-subnets`.
+    Default: 172.31.0.0/20
+
+  ClientVpnTargetSubnetCidrTwo:
+    Type: String
+    Description: >
+      CIDR block of the second subnet the Client VPN endpoint is associated
+      with (see ClientVpnTargetSubnetCidrOne). If the endpoint only has one
+      target-network association, set this to the same value as
+      ClientVpnTargetSubnetCidrOne.
+    Default: 172.31.16.0/20
+
+  AssignPublicIp:
+    Type: String
+    AllowedValues: [ENABLED, DISABLED]
+    Default: DISABLED
+    Description: >
+      Whether the task also gets a public IP. Leave DISABLED — the whole
+      point of this variant is that the task is reachable only through the
+      Client VPN. ENABLED is only useful as a fallback debugging path.
+
+  ClusterName:
+    Type: String
+    Default: agents-cluster
+
+  ImageRepository:
+    Type: String
+    Default: 250233190882.dkr.ecr.us-east-1.amazonaws.com/mixer
+
+  ImageTag:
+    Type: String
+    Default: latest
+
+  ContainerPort:
+    Type: Number
+    Default: 8000
+
+  TaskCpu:
+    Type: String
+    Default: "2048"
+    Description: Task-level vCPU units (hard cap)
+
+  TaskMemory:
+    Type: String
+    Default: "8192"
+    Description: Task-level memory in MiB (hard cap)
+
+  Host:
+    Type: String
+    Default: agt-dev.self.remixlabs.com
+
+  WorkspaceCreators:
+    Type: String
+    Default: "user/chris@remixlabs.com"
+
+  AuthPublicKeyEndpoint:
+    Type: String
+    Default: "https://auth.remixlabs.com/a/x/jwks.json"
+
+  AgentCacheSize:
+    Type: String
+    Default: "1GiB"
+
+  AgentParamsLimit:
+    Type: String
+    Default: "10MiB"
+
+  LogLevel:
+    Type: String
+    Default: "info"
+
+  VolumeGid:
+    Type: Number
+    Default: 33
+    Description: GID that owns the /dbs mount, via the EFS access point's root directory
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
+Resources:
+  # ---------- Networking ----------
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "mixer-${Env} Fargate task"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          CidrIp: !Ref ClientVpnTargetSubnetCidrOne
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          CidrIp: !Ref ClientVpnTargetSubnetCidrTwo
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "mixer-${Env} EFS mount targets"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref ServiceSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  # ---------- Persistent volume (analogous to pvc.yaml's EBS PV/PVC) ----------
+  AgentDbFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "agent-db-${Env}"
+
+  EfsMountTargetOne:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref AgentDbFileSystem
+      SubnetId: !Ref SubnetOne
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+
+  EfsMountTargetTwo:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref AgentDbFileSystem
+      SubnetId: !Ref SubnetTwo
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+
+  AgentDbAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref AgentDbFileSystem
+      PosixUser:
+        Uid: "0"
+        Gid: !Ref VolumeGid
+      RootDirectory:
+        Path: "/dbs"
+        CreationInfo:
+          OwnerUid: "0"
+          OwnerGid: !Ref VolumeGid
+          Permissions: "0775"
+      AccessPointTags:
+        - Key: Name
+          Value: !Sub "agent-db-${Env}"
+
+  # ---------- Logs ----------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/mixer-${Env}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ---------- IAM ----------
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "mixer-${Env}-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "mixer-${Env}-task-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: efs-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:ClientRootAccess
+                Resource: !Sub "arn:${AWS::Partition}:elasticfilesystem:${AWS::Region}:${AWS::AccountId}:file-system/${AgentDbFileSystem}"
+                Condition:
+                  StringEquals:
+                    elasticfilesystem:AccessPointArn: !Sub "arn:${AWS::Partition}:elasticfilesystem:${AWS::Region}:${AWS::AccountId}:access-point/${AgentDbAccessPoint}"
+
+  # ---------- Compute ----------
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "mixer-${Env}"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Volumes:
+        - Name: agent-db
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref AgentDbFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref AgentDbAccessPoint
+              IAM: ENABLED
+      ContainerDefinitions:
+        - Name: mixer
+          Image: !Sub "${ImageRepository}:${ImageTag}"
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+          LinuxParameters:
+            Capabilities:
+              Add: ["SYS_PTRACE"]
+          Command:
+            - "--host"
+            - !Ref Host
+            - "--agent-cache-size"
+            - !Ref AgentCacheSize
+            - "--params-limit"
+            - !Ref AgentParamsLimit
+            - "--jwks-url"
+            - !Ref AuthPublicKeyEndpoint
+          Environment:
+            - Name: WORKSPACE_CREATORS
+              Value: !Ref WorkspaceCreators
+            - Name: RMX_HOST
+              Value: !Ref Host
+            - Name: RUST_LOG
+              Value: !Ref LogLevel
+          MountPoints:
+            - SourceVolume: agent-db
+              ContainerPath: /dbs
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: mixer
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+
+  # ---------- Service ----------
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - EfsMountTargetOne
+      - EfsMountTargetTwo
+    Properties:
+      ServiceName: !Sub "agent-server-${Env}"
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: 1
+      # Stop the old task before starting the replacement, since only one
+      # task can safely hold the custom database at a time (same reasoning
+      # as the chart's `strategy: Recreate`).
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 0
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: !Ref AssignPublicIp
+          Subnets:
+            - !Ref SubnetOne
+            - !Ref SubnetTwo
+          SecurityGroups:
+            - !Ref ServiceSecurityGroup
+
+Outputs:
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !GetAtt Service.Name
+  TaskDefinitionArn:
+    Value: !Ref TaskDefinition
+  EfsFileSystemId:
+    Value: !Ref AgentDbFileSystem
+  EfsAccessPointId:
+    Value: !Ref AgentDbAccessPoint
+  LogGroupName:
+    Value: !Ref LogGroup

@@ -33,18 +33,25 @@ Services environment.
 
 ## Example configurations
 
-Here are three example deployment configurations; which is most useful will
+Here are four example deployment configurations; which is most useful will
 depend on your existing infrastructure. ECS is the simplest to get up and
 running and requires the fewest prerequisites and configuration.
 
-The ECS configuration is provided as a CloudFormation template, while the EKS
+The ECS configurations are provided as CloudFormation templates, while the EKS
 examples are Helm charts (which could be straightforwardly ported to other
 Kubernetes environments).
 
 [ecs-fargate](ecs-fargate/README.md) provides a CloudFormation template for a
 complete ECS deployment, including the cluster definition, management roles,
-etc. So far, only direct public-IP (from a specified ingress IP) is documented
-as a mechanism of exposure.
+etc. It documents two ways to reach the (by default, fully private) service:
+a locked-down public IP for quick testing, and an SSM port-forwarding tunnel
+for fully private access without any public exposure.
+
+[ecs-fargate-client-vpn](ecs-fargate-client-vpn/README.md) is the same ECS
+deployment, configured for the more typical customer shape: internal users
+reaching the server through an existing AWS Client VPN into the VPC, rather
+than a public IP or an ad hoc tunnel. It also documents how to stand up a
+Client VPN endpoint from scratch in a test account.
 
 [eks-full](eks-full/README.md) provides a complete EKS example configuration,
 including a load balancer, cluster definition, load balancer, ingress rules,
