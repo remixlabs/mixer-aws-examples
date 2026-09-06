@@ -189,6 +189,26 @@ Resources:
         - Key: Name
           Value: !Sub "agent-db-${Env}"
 
+  # ---------- Service discovery (stable DNS name for the task) ----------
+  ServiceDiscoveryNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: !Sub "mixer-${Env}.internal"
+      Vpc: !Ref VpcId
+
+  ServiceDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: mixer
+      NamespaceId: !Ref ServiceDiscoveryNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 10
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
   # ---------- Logs ----------
   LogGroup:
     Type: AWS::Logs::LogGroup
@@ -323,6 +343,8 @@ Resources:
             - !Ref SubnetTwo
           SecurityGroups:
             - !Ref ServiceSecurityGroup
+      ServiceRegistries:
+        - RegistryArn: !GetAtt ServiceDiscoveryService.Arn
 
 Outputs:
   ClusterName:
@@ -337,3 +359,6 @@ Outputs:
     Value: !Ref AgentDbAccessPoint
   LogGroupName:
     Value: !Ref LogGroup
+  ServiceDnsName:
+    Description: Stable DNS name for the task, resolvable from within the VPC (and Client VPN clients using its DNS resolver).
+    Value: !Sub "mixer.mixer-${Env}.internal"

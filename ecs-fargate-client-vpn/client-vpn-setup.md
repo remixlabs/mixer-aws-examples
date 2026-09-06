@@ -72,6 +72,16 @@ CA_CERT_ARN=$(aws acm import-certificate \
 ## 3. Create the Client VPN endpoint
 
 ```sh
+VPC_CIDR=$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" --query 'Vpcs[0].CidrBlock' --output text)
+# .2 of the VPC's own CIDR is always the reserved Amazon-provided DNS
+# resolver address. Passing it as --dns-servers is what lets connected
+# clients resolve private DNS names in this VPC — e.g. the Cloud Map/Route 53
+# private hosted zone template.yaml creates for the mixer service (see the
+# base README's "Reaching the service"). Without it, each client just keeps
+# using its own pre-existing DNS server, which has no idea these private
+# names exist.
+RESOLVER_IP=$(python3 -c "import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1]).network_address + 2)" "$VPC_CIDR")
+
 CLIENT_VPN_ID=$(aws ec2 create-client-vpn-endpoint \
   --description "mixer test Client VPN" \
   --client-cidr-block 10.100.0.0/22 \
@@ -79,9 +89,13 @@ CLIENT_VPN_ID=$(aws ec2 create-client-vpn-endpoint \
   --authentication-options "Type=certificate-authentication,MutualAuthentication={ClientRootCertificateChainArn=$CA_CERT_ARN}" \
   --connection-log-options Enabled=false \
   --split-tunnel \
+  --dns-servers "$RESOLVER_IP" \
   --vpc-id "$VPC_ID" \
   --query ClientVpnEndpointId --output text)
 ```
+
+The resolver IP falls inside `VPC_CIDR`, which step 5 authorizes, so no
+extra authorization rule is needed for it.
 
 `--split-tunnel` matters for a demo: without it, *all* client traffic
 (including normal internet browsing) routes through the endpoint, which
@@ -125,13 +139,12 @@ the VPN's client CIDR block from step 3).
 ## 5. Authorize access to the VPC
 
 Associating a subnet makes it *routable*; an authorization rule is what
-actually lets connected clients reach it. `VPC_CIDR` is the CIDR block of
-`$VPC_ID` from step 3 — look it up rather than guessing it, since a
-non-default VPC's CIDR isn't always `10.0.0.0/16`:
+actually lets connected clients reach it. Reuse `$VPC_CIDR` from step 3
+(look it up fresh with `aws ec2 describe-vpcs --vpc-ids "$VPC_ID" --query
+'Vpcs[0].CidrBlock' --output text` if you're running this step in a new
+shell — a non-default VPC's CIDR isn't always `10.0.0.0/16`):
 
 ```sh
-VPC_CIDR=$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" --query 'Vpcs[0].CidrBlock' --output text)
-
 aws ec2 authorize-client-vpn-ingress \
   --client-vpn-endpoint-id "$CLIENT_VPN_ID" \
   --target-network-cidr "$VPC_CIDR" \
@@ -175,7 +188,7 @@ With the VPN connected, set `ClientVpnTargetSubnetCidrOne`/`Two` in
 step 4 — **not** `--client-cidr-block` from step 3 (traffic reaching the
 VPC arrives NAT'd to an address in the associated subnets, not the client's
 own address). Then follow the README to deploy the stack and reach the
-task's private IP directly.
+task at its stable DNS name.
 
 ## Tearing down
 
