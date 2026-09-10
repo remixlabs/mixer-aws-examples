@@ -107,6 +107,10 @@ private routes.
     `DescribeAccountAttributes`, `DescribeAddresses`, `DescribeTags`) —
     what `CreateLoadBalancer` needs to validate the subnets you gave it
     actually route to an Internet Gateway.
+  - `elasticloadbalancing:SetRulePriorities` — `AWS::ElasticLoadBalancingV2::ListenerRule`'s
+    update handler calls this itself to shuffle priorities out of the way
+    before it can create/replace a rule, any time a stack update adds,
+    removes, or reorders listener rules.
 
 Everything else — EFS volume, Cloud Map private namespace, task
 definition — is identical to `ecs-fargate-client-vpn`; see that README for

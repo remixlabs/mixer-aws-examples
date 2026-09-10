@@ -78,6 +78,7 @@
         "elasticloadbalancing:DeleteRule",
         "elasticloadbalancing:DescribeRules",
         "elasticloadbalancing:ModifyRule",
+        "elasticloadbalancing:SetRulePriorities",
         "elasticloadbalancing:AddTags",
         "elasticloadbalancing:RemoveTags",
         "elasticloadbalancing:DescribeTags"
