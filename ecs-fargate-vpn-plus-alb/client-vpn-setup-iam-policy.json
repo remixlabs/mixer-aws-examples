@@ -1,0 +1,45 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AcmCertificatesForTheVpnEndpoint",
+      "Effect": "Allow",
+      "Action": [
+        "acm:ImportCertificate",
+        "acm:DescribeCertificate",
+        "acm:DeleteCertificate"
+      ],
+      "Resource": "arn:aws:acm:*:*:certificate/*"
+    },
+    {
+      "Sid": "ClientVpnServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/clientvpn.amazonaws.com/AWSServiceRoleForClientVPN",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": "clientvpn.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "ClientVpnEndpointLifecycle",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeVpcs",
+        "ec2:CreateClientVpnEndpoint",
+        "ec2:DeleteClientVpnEndpoint",
+        "ec2:DescribeClientVpnEndpoints",
+        "ec2:AssociateClientVpnTargetNetwork",
+        "ec2:DisassociateClientVpnTargetNetwork",
+        "ec2:DescribeClientVpnTargetNetworks",
+        "ec2:AuthorizeClientVpnIngress",
+        "ec2:RevokeClientVpnIngress",
+        "ec2:DescribeClientVpnAuthorizationRules",
+        "ec2:ExportClientVpnClientConfiguration",
+        "ec2:CreateTags"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

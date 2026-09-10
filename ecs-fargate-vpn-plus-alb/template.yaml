@@ -1,0 +1,733 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Runs the "mixer" server on ECS Fargate, reachable two ways at once: private
+  Client VPN access for normal use, plus a public Application Load Balancer
+  that exposes only specific, named URL paths (webhooks, an OAuth callback,
+  etc.) to the internet for callers that can't be on the VPN. Unlike
+  ../ecs-fargate-client-vpn, this stack creates its own VPC from scratch —
+  a public and private subnet pair in each of two AZs, an Internet Gateway,
+  a NAT Gateway, and matching route tables — rather than assuming one
+  already exists, so there's no way to end up with the ALB and the task in
+  AZs that don't line up. It also creates a public Route 53 hosted zone and
+  DNS-validated ACM certificate for a subdomain you own, so the whole thing
+  is self-contained beyond delegating that subdomain's NS records and
+  pointing a Client VPN endpoint at the VPC this stack creates — see the
+  README.
+
+Parameters:
+  Env:
+    Type: String
+    Default: dev
+    Description: Environment name, used to namespace resources (e.g. dev, staging, prod).
+
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for the VPC this stack creates.
+
+  PrivateSubnetOneCidr:
+    Type: String
+    Default: 10.0.0.0/24
+    Description: >
+      CIDR for the private subnet (Fargate task + EFS mount target) in the
+      first AZ. Paired with PublicSubnetOneCidr in the same AZ.
+
+  PrivateSubnetTwoCidr:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: >
+      CIDR for the private subnet (Fargate task + EFS mount target) in the
+      second AZ. Paired with PublicSubnetTwoCidr in the same AZ.
+
+  PublicSubnetOneCidr:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: >
+      CIDR for the public subnet (ALB + NAT Gateway) in the first AZ - the
+      same AZ as PrivateSubnetOneCidr. An ALB target group requires every
+      target's AZ to be one the load balancer itself has an enabled subnet
+      in, even for TargetType: ip, so this pairing is what actually matters
+      here, not just having "some" public subnets.
+
+  PublicSubnetTwoCidr:
+    Type: String
+    Default: 10.0.3.0/24
+    Description: >
+      CIDR for the public subnet (ALB) in the second AZ - the same AZ as
+      PrivateSubnetTwoCidr.
+
+  AssignPublicIp:
+    Type: String
+    AllowedValues: [ENABLED, DISABLED]
+    Default: DISABLED
+    Description: >
+      Whether the task also gets a public IP. Leave DISABLED — egress goes
+      through the NAT Gateway this stack creates, and the task itself
+      should still only be reachable via the Client VPN or the ALB (which
+      route through their own security groups), never directly. ENABLED is
+      only useful as a fallback debugging path.
+
+  SubdomainName:
+    Type: String
+    Description: >
+      A fresh subdomain this stack will manage entirely (e.g.
+      mixer-dev.example.com) — it creates a public Route 53 hosted zone and
+      an ACM certificate for exactly this name. You'll delegate it by
+      setting NS records at the parent domain's DNS provider once the stack
+      reports the generated name servers; see the README. Don't point this
+      at a domain/subdomain some other system already manages, since this
+      stack becomes authoritative for it.
+
+  ExposedHealthCheckPath:
+    Type: String
+    Default: "/"
+    Description: Path the ALB target group health-checks directly against the task (bypasses listener rules).
+
+  ClusterName:
+    Type: String
+    Default: agents-cluster
+
+  ImageRepository:
+    Type: String
+    Default: 250233190882.dkr.ecr.us-east-1.amazonaws.com/mixer
+
+  ImageTag:
+    Type: String
+    Default: latest
+
+  ContainerPort:
+    Type: Number
+    Default: 8000
+
+  TaskCpu:
+    Type: String
+    Default: "2048"
+    Description: Task-level vCPU units (hard cap)
+
+  TaskMemory:
+    Type: String
+    Default: "8192"
+    Description: Task-level memory in MiB (hard cap)
+
+  Host:
+    Type: String
+    Default: agt-dev.self.remixlabs.com
+
+  WorkspaceCreators:
+    Type: String
+    Default: "user/chris@remixlabs.com"
+
+  AuthPublicKeyEndpoint:
+    Type: String
+    Default: "https://auth.remixlabs.com/a/x/jwks.json"
+
+  AgentCacheSize:
+    Type: String
+    Default: "1GiB"
+
+  AgentParamsLimit:
+    Type: String
+    Default: "10MiB"
+
+  LogLevel:
+    Type: String
+    Default: "info"
+
+  VolumeGid:
+    Type: Number
+    Default: 33
+    Description: GID that owns the /dbs mount, via the EFS access point's root directory
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
+Resources:
+  # ---------- Networking: VPC ----------
+  # Standard 2-AZ reference layout: a public + private subnet pair per AZ,
+  # one Internet Gateway, one NAT Gateway (shared by both private subnets -
+  # cheaper for an example; a real deployment wanting per-AZ egress
+  # resilience would give each AZ its own NAT Gateway instead), and route
+  # tables wiring it together. Building this here (rather than assuming a
+  # VPC already exists) is what guarantees SubnetOne/PublicSubnetOne and
+  # SubnetTwo/PublicSubnetTwo always share an AZ - see PublicSubnetOneCidr's
+  # description for why that pairing matters.
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "mixer-${Env}"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "mixer-${Env}"
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetOneCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "mixer-${Env} public 1"
+
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetTwoCidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "mixer-${Env} public 2"
+
+  SubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetOneCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "mixer-${Env} private 1"
+
+  SubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetTwoCidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "mixer-${Env} private 2"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "mixer-${Env} public"
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetOne
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetTwo
+      RouteTableId: !Ref PublicRouteTable
+
+  NatGatewayEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: PublicSubnetOneRouteTableAssociation
+    Properties:
+      AllocationId: !GetAtt NatGatewayEip.AllocationId
+      SubnetId: !Ref PublicSubnetOne
+      Tags:
+        - Key: Name
+          Value: !Sub "mixer-${Env}"
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "mixer-${Env} private"
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  SubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetOne
+      RouteTableId: !Ref PrivateRouteTable
+
+  SubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetTwo
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ---------- Networking: security groups ----------
+  ServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "mixer-${Env} Fargate task"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          CidrIp: !GetAtt SubnetOne.CidrBlock
+          Description: >-
+            Client VPN traffic arrives NATed to an address in whichever
+            subnet the endpoint is associated with - point that
+            association at SubnetOne/SubnetTwo (see the README) so this
+            matches, instead of a separately-tracked CIDR parameter.
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          CidrIp: !GetAtt SubnetTwo.CidrBlock
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+          Description: >-
+            Only the ALB, not the internet directly - the ALB listener
+            rules are what actually restrict this to specific paths.
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "mixer-${Env} public ALB"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Redirected straight to 443 by the listener below, never forwarded to the task.
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "mixer-${Env} EFS mount targets"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref ServiceSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  # ---------- Persistent volume (analogous to pvc.yaml's EBS PV/PVC) ----------
+  AgentDbFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "agent-db-${Env}"
+
+  EfsMountTargetOne:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref AgentDbFileSystem
+      SubnetId: !Ref SubnetOne
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+
+  EfsMountTargetTwo:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref AgentDbFileSystem
+      SubnetId: !Ref SubnetTwo
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+
+  AgentDbAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref AgentDbFileSystem
+      PosixUser:
+        Uid: "0"
+        Gid: !Ref VolumeGid
+      RootDirectory:
+        Path: "/dbs"
+        CreationInfo:
+          OwnerUid: "0"
+          OwnerGid: !Ref VolumeGid
+          Permissions: "0775"
+      AccessPointTags:
+        - Key: Name
+          Value: !Sub "agent-db-${Env}"
+
+  # ---------- Service discovery (stable DNS name for the task) ----------
+  ServiceDiscoveryNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: !Sub "mixer-${Env}.internal"
+      Vpc: !Ref Vpc
+
+  ServiceDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: mixer
+      NamespaceId: !Ref ServiceDiscoveryNamespace
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 10
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  # ---------- Public DNS + TLS for the subdomain this stack owns ----------
+  # Creating the zone is near-instant; ACM's DNS validation below is what
+  # actually blocks stack creation until SubdomainName's NS records are
+  # delegated at the parent domain. See the README's deploy sequence.
+  PublicHostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref SubdomainName
+      HostedZoneTags:
+        - Key: Name
+          Value: !Sub "mixer-${Env}"
+
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref SubdomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref SubdomainName
+          HostedZoneId: !Ref PublicHostedZone
+
+  PublicDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref PublicHostedZone
+      Name: !Ref SubdomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt LoadBalancer.DNSName
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: true
+
+  # ---------- Public ALB: exposes only specific named paths ----------
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "mixer-${Env}"
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "mixer-${Env}"
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: !Ref ContainerPort
+      TargetType: ip
+      HealthCheckPath: !Ref ExposedHealthCheckPath
+      HealthCheckProtocol: HTTP
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref Certificate
+      # Deliberately NOT a forward to TargetGroup: anything not matched by
+      # one of the ListenerRules below (i.e. everything except the specific
+      # paths this stack means to expose) gets a flat 403, never reaches the
+      # task. Add a new AWS::ElasticLoadBalancingV2::ListenerRule for each
+      # additional path you want public — don't loosen this default.
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "403"
+            ContentType: text/plain
+            MessageBody: "Not found"
+
+  # ---------- Example exposed paths — add one ListenerRule per real path ----------
+  APIDocsListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 15
+      Conditions:
+        - Field: path-pattern
+          Values: ["/v1/swagger/*", "/v1/_doc/openapi.json"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  OauthCallbackListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          Values: ["/v1/oauth/callback"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ---------- Logs ----------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/mixer-${Env}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ---------- IAM ----------
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "mixer-${Env}-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "mixer-${Env}-task-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: efs-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:ClientRootAccess
+                Resource: !Sub "arn:${AWS::Partition}:elasticfilesystem:${AWS::Region}:${AWS::AccountId}:file-system/${AgentDbFileSystem}"
+                Condition:
+                  StringEquals:
+                    elasticfilesystem:AccessPointArn: !Sub "arn:${AWS::Partition}:elasticfilesystem:${AWS::Region}:${AWS::AccountId}:access-point/${AgentDbAccessPoint}"
+
+  # ---------- Compute ----------
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "mixer-${Env}"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Volumes:
+        - Name: agent-db
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref AgentDbFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref AgentDbAccessPoint
+              IAM: ENABLED
+      ContainerDefinitions:
+        - Name: mixer
+          Image: !Sub "${ImageRepository}:${ImageTag}"
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              Protocol: tcp
+          # TCP-only (not a real HTTP check) so it needs nothing beyond
+          # bash already being in the image - no curl/wget dependency.
+          # Won't catch the app accepting connections but returning 5xx;
+          # the ALB target group's HTTP health check still covers that.
+          HealthCheck:
+            Command:
+              - "CMD-SHELL"
+              - !Sub "bash -c 'exec 3<>/dev/tcp/127.0.0.1/${ContainerPort}'"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+          LinuxParameters:
+            Capabilities:
+              Add: ["SYS_PTRACE"]
+          Command:
+            - "--host"
+            - !Ref Host
+            - "--agent-cache-size"
+            - !Ref AgentCacheSize
+            - "--params-limit"
+            - !Ref AgentParamsLimit
+            - "--jwks-url"
+            - !Ref AuthPublicKeyEndpoint
+          Environment:
+            - Name: WORKSPACE_CREATORS
+              Value: !Ref WorkspaceCreators
+            - Name: RMX_HOST
+              Value: !Ref Host
+            - Name: RUST_LOG
+              Value: !Ref LogLevel
+          MountPoints:
+            - SourceVolume: agent-db
+              ContainerPath: /dbs
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: mixer
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+
+  # ---------- Service ----------
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - EfsMountTargetOne
+      - EfsMountTargetTwo
+      # ECS refuses to register targets on a target group that isn't yet
+      # attached to a listener — this dependency isn't implied just by
+      # !Ref TargetGroup below, so it has to be explicit.
+      - HttpsListener
+    Properties:
+      ServiceName: !Sub "agent-server-${Env}"
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: 1
+      # Stop the old task before starting the replacement, since only one
+      # task can safely hold the custom database at a time (same reasoning
+      # as the chart's `strategy: Recreate`).
+      DeploymentConfiguration:
+        MaximumPercent: 100
+        MinimumHealthyPercent: 0
+      HealthCheckGracePeriodSeconds: 30
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: !Ref AssignPublicIp
+          Subnets:
+            - !Ref SubnetOne
+            - !Ref SubnetTwo
+          SecurityGroups:
+            - !Ref ServiceSecurityGroup
+      LoadBalancers:
+        - ContainerName: mixer
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+      ServiceRegistries:
+        - RegistryArn: !GetAtt ServiceDiscoveryService.Arn
+
+Outputs:
+  VpcId:
+    Description: >-
+      The VPC this stack created. Point a new Client VPN endpoint's
+      target-network association at SubnetOneId/SubnetTwoId below within
+      this VPC - see the README.
+    Value: !Ref Vpc
+  SubnetOneId:
+    Description: Private subnet (AZ 1) the task and one EFS mount target run in. Associate the Client VPN endpoint with this subnet.
+    Value: !Ref SubnetOne
+  SubnetTwoId:
+    Description: Private subnet (AZ 2) the task and the other EFS mount target run in. Associate the Client VPN endpoint with this subnet.
+    Value: !Ref SubnetTwo
+  PublicSubnetOneId:
+    Value: !Ref PublicSubnetOne
+  PublicSubnetTwoId:
+    Value: !Ref PublicSubnetTwo
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !GetAtt Service.Name
+  TaskDefinitionArn:
+    Value: !Ref TaskDefinition
+  EfsFileSystemId:
+    Value: !Ref AgentDbFileSystem
+  EfsAccessPointId:
+    Value: !Ref AgentDbAccessPoint
+  LogGroupName:
+    Value: !Ref LogGroup
+  ServiceDnsName:
+    Description: Stable DNS name for the task, resolvable from within the VPC (and Client VPN clients using its DNS resolver).
+    Value: !Sub "mixer.mixer-${Env}.internal"
+  PublicHostedZoneId:
+    Description: >-
+      Hosted zone ID for SubdomainName. Look up its NS records with `aws
+      route53 get-hosted-zone --id <this>` while the stack is still creating
+      — see the README's deploy sequence.
+    Value: !Ref PublicHostedZone
+  PublicHostedZoneNameServers:
+    Description: NS records to delegate at SubdomainName's parent domain. Same values as GetHostedZone; only populated once the stack reaches CREATE_COMPLETE.
+    Value: !Join [", ", !GetAtt PublicHostedZone.NameServers]
+  PublicServiceUrl:
+    Description: Public HTTPS entry point — only the paths in the ALB's ListenerRules (e.g. /webhooks/*, /oauth/callback) actually resolve; everything else gets a 403.
+    Value: !Sub "https://${SubdomainName}"
+  LoadBalancerDnsName:
+    Value: !GetAtt LoadBalancer.DNSName

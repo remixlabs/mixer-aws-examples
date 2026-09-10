@@ -101,61 +101,10 @@ needs the raw IP. The record uses a 10s TTL so failover after a task
 replacement is fast.
 
 This requires the Client VPN endpoint to have `DnsServers` set to the VPC's
-own resolver — **not the default.** An endpoint with no `DnsServers`
-configured leaves each client's pre-existing DNS server untouched, which has
-no way to resolve a private hosted zone scoped to this VPC (you'll still be
-able to reach the task by IP; only the name fails, with "could not resolve
-host"). Check the endpoint's current setting:
-```sh
-aws ec2 describe-client-vpn-endpoints \
-  --client-vpn-endpoint-id <id> --query 'ClientVpnEndpoints[0].DnsServers'
-```
-If it's empty, set it to the VPC's `.2` address (always the reserved
-Amazon-provided DNS resolver, regardless of subnet):
-```sh
-VPC_CIDR=$(aws ec2 describe-vpcs --vpc-ids <vpc-id> --query 'Vpcs[0].CidrBlock' --output text)
-RESOLVER_IP=$(python3 -c "import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1]).network_address + 2)" "$VPC_CIDR")
-aws ec2 modify-client-vpn-endpoint \
-  --client-vpn-endpoint-id <id> \
-  --dns-servers CustomDnsServers="$RESOLVER_IP",Enabled=true
-```
-Clients must disconnect and reconnect afterward — DNS servers are pushed at
-connection time. (If you're standing up a fresh endpoint via
-[`client-vpn-setup.md`](client-vpn-setup.md), it sets this at creation time
-instead, so this step isn't needed there.)
-
-If DNS still doesn't resolve once `DnsServers` is confirmed set correctly,
-check for a conflict with **another VPN-like tool that manages system DNS**
-(Tailscale with MagicDNS is a common one on macOS) — it can claim the
-machine's global/unscoped DNS resolver slot outright, so the Client VPN's
-pushed DNS server never gets consulted. Run `scutil --dns` while connected:
-if the VPC resolver IP is missing entirely and some other tool's DNS server
-is the only unscoped resolver, add an explicit domain-scoped resolver
-instead of relying on the pushed one (this takes precedence over an
-unscoped catch-all resolver for matching queries, and doesn't require
-changing the other tool's config):
-```sh
-sudo mkdir -p /etc/resolver
-echo "nameserver <vpc-resolver-ip>" | sudo tee /etc/resolver/mixer-<env>.internal
-sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
-```
-This file is static and persists after disconnecting the VPN, so lookups
-for that domain will hang/fail while disconnected — remove it
-(`sudo rm /etc/resolver/mixer-<env>.internal`) once you're done testing.
-
-If you still need the raw IP for debugging (e.g. to rule out DNS as the
-issue), the base example's lookup still works:
-```sh
-TASK_ARN=$(aws ecs list-tasks --cluster agents-cluster --service-name agent-server-dev --query 'taskArns[0]' --output text)
-ENI_ID=$(aws ecs describe-tasks --cluster agents-cluster --tasks "$TASK_ARN" \
-  --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' --output text)
-TASK_IP=$(aws ec2 describe-network-interfaces --network-interface-ids "$ENI_ID" \
-  --query 'NetworkInterfaces[0].PrivateIpAddress' --output text)
-```
-
-If the connection hangs rather than being actively refused, double check
-`ClientVpnTargetSubnetCidrOne`/`Two` — they need to be the associated
-subnets' CIDRs, not the VPN's client CIDR block.
+own resolver — **not the default.** If name resolution doesn't work (or you
+hit anything else connecting through the VPN), see
+[`client-vpn-setup.md`](client-vpn-setup.md)'s "Troubleshooting" section for
+how to check/fix that and other common pitfalls.
 
 ## Outputs
 

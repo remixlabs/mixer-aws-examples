@@ -283,6 +283,16 @@ Resources:
           PortMappings:
             - ContainerPort: !Ref ContainerPort
               Protocol: tcp
+          # TCP-only (not a real HTTP check) so it needs nothing beyond
+          # bash already being in the image - no curl/wget dependency.
+          HealthCheck:
+            Command:
+              - "CMD-SHELL"
+              - !Sub "bash -c 'exec 3<>/dev/tcp/127.0.0.1/${ContainerPort}'"
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
           LinuxParameters:
             Capabilities:
               Add: ["SYS_PTRACE"]

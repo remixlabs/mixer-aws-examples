@@ -1,20 +1,35 @@
 # Setting up AWS Client VPN from scratch (test account)
 
-This walks through standing up a minimal AWS Client VPN endpoint against an
-existing VPC, purely so `template.yaml` in this directory has something real
-to assume already exists. It uses mutual TLS certificate authentication with
-a self-signed test CA — the standard AWS quick-start path — which is fine for
-a disposable test account but **not** how a real customer would run this: a
-production setup would use their existing corporate PKI or federated SAML
-auth (`AWS::EC2::ClientVpnEndpoint`'s `federated-authentication` type)
-against their IdP instead of hand-rolled certificates.
+This walks through standing up a minimal AWS Client VPN endpoint against the
+VPC that `template.yaml` in this directory creates for itself. It uses
+mutual TLS certificate authentication with a self-signed test CA — the
+standard AWS quick-start path — which is fine for a disposable test account
+but **not** how a real customer would run this: a production setup would
+use their existing corporate PKI or federated SAML auth
+(`AWS::EC2::ClientVpnEndpoint`'s `federated-authentication` type) against
+their IdP instead of hand-rolled certificates.
+
+**Run this after deploying the mixer stack, not before.** Unlike a template
+that assumes a VPC already exists, this one creates its own — so the
+`VpcId`/`SubnetOneId`/`SubnetTwoId` this file needs come from that stack's
+Outputs, not from something you already had lying around:
+
+```sh
+VPC_ID=$(aws cloudformation describe-stacks --stack-name mixer-dev \
+  --query 'Stacks[0].Outputs[?OutputKey==`VpcId`].OutputValue' --output text)
+SUBNET_ONE=$(aws cloudformation describe-stacks --stack-name mixer-dev \
+  --query 'Stacks[0].Outputs[?OutputKey==`SubnetOneId`].OutputValue' --output text)
+SUBNET_TWO=$(aws cloudformation describe-stacks --stack-name mixer-dev \
+  --query 'Stacks[0].Outputs[?OutputKey==`SubnetTwoId`].OutputValue' --output text)
+```
 
 This is a one-time, admin-run setup — a different persona and a different,
-broader set of permissions than `admin-iam-policy.json` in this directory
-(which only covers day-to-day deploys of the mixer stack against a VPN that
-already exists).
+broader set of permissions than `admin-iam-policy-core.json` +
+`admin-iam-policy-public-endpoint.json` + `admin-iam-policy-networking.json`
+in this directory (which only cover day-to-day deploys of the mixer stack
+itself).
 
-## What you need beyond a VPC
+## What you need beyond the deployed mixer stack
 
 - `aws` CLI configured against the test account.
 - `easy-rsa` (or any tool that gets you an X.509 CA + server + client cert)
@@ -77,7 +92,7 @@ VPC_CIDR=$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" --query 'Vpcs[0].CidrBlock'
 # resolver address. Passing it as --dns-servers is what lets connected
 # clients resolve private DNS names in this VPC — e.g. the Cloud Map/Route 53
 # private hosted zone template.yaml creates for the mixer service (see the
-# base README's "Reaching the service"). Without it, each client just keeps
+# README's "Reaching the service"). Without it, each client just keeps
 # using its own pre-existing DNS server, which has no idea these private
 # names exist.
 RESOLVER_IP=$(python3 -c "import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1]).network_address + 2)" "$VPC_CIDR")
@@ -95,7 +110,9 @@ CLIENT_VPN_ID=$(aws ec2 create-client-vpn-endpoint \
 ```
 
 The resolver IP falls inside `VPC_CIDR`, which step 5 authorizes, so no
-extra authorization rule is needed for it.
+extra authorization rule is needed for it. `10.100.0.0/22` (the VPN
+client CIDR) is deliberately outside `VpcCidr` (`10.0.0.0/16` by default) —
+Client VPN requires the two not to overlap.
 
 `--split-tunnel` matters for a demo: without it, *all* client traffic
 (including normal internet browsing) routes through the endpoint, which
@@ -115,9 +132,13 @@ It's a one-time cost per account; harmless to leave granted after.
 
 ## 4. Associate target subnets
 
-Associate at least one subnet per AZ you want to route through — this is
-also what auto-adds a route for the VPC's local CIDR to the endpoint's own
-route table for that AZ:
+Associate with `$SUBNET_ONE`/`$SUBNET_TWO` — the mixer stack's own private
+subnets, from its `SubnetOneId`/`SubnetTwoId` Outputs. This is also what
+`ServiceSecurityGroup` in `template.yaml` already trusts by CIDR block
+directly (see its ingress rule descriptions), so associating here is all
+that's needed — there's no separate parameter to go back and set
+afterward, unlike the plain `ecs-fargate-client-vpn` example where the VPC
+already existed and the CIDRs had to be looked up and fed back in:
 
 ```sh
 aws ec2 associate-client-vpn-target-network \
@@ -130,19 +151,10 @@ Each association takes a few minutes to go from `associating` to
 `associated` (`aws ec2 describe-client-vpn-target-networks
 --client-vpn-endpoint-id "$CLIENT_VPN_ID"`).
 
-Note the CIDRs of `$SUBNET_ONE`/`$SUBNET_TWO` themselves (`aws ec2
-describe-subnets --subnet-ids "$SUBNET_ONE" "$SUBNET_TWO"`) — you'll need
-them for `ClientVpnTargetSubnetCidrOne`/`Two` when deploying the stack, in
-step 7 (that's the CIDR range mixer's security group needs to trust, not
-the VPN's client CIDR block from step 3).
-
 ## 5. Authorize access to the VPC
 
 Associating a subnet makes it *routable*; an authorization rule is what
-actually lets connected clients reach it. Reuse `$VPC_CIDR` from step 3
-(look it up fresh with `aws ec2 describe-vpcs --vpc-ids "$VPC_ID" --query
-'Vpcs[0].CidrBlock' --output text` if you're running this step in a new
-shell — a non-default VPC's CIDR isn't always `10.0.0.0/16`):
+actually lets connected clients reach it. Reuse `$VPC_CIDR` from step 3:
 
 ```sh
 aws ec2 authorize-client-vpn-ingress \
@@ -152,8 +164,10 @@ aws ec2 authorize-client-vpn-ingress \
 ```
 
 (Authorizing the whole VPC CIDR is the simplest thing for a test endpoint;
-`--target-network-cidr` can be narrowed to just the mixer task's subnets if
-you want the authorization scoped tighter than "reach anything in the VPC".)
+`--target-network-cidr` can be narrowed to just `$SUBNET_ONE`/`$SUBNET_TWO`
+if you want the authorization scoped tighter than "reach anything in the
+VPC" — e.g. to exclude the public subnets the ALB/NAT Gateway sit in, which
+VPN clients have no reason to reach directly.)
 
 ## 6. Export and finish the client config
 
@@ -183,83 +197,32 @@ OpenVPN Connect — it's a standard OpenVPN profile) and connect.
 
 ## 7. Verify
 
-With the VPN connected, set `ClientVpnTargetSubnetCidrOne`/`Two` in
-`parameters.example.json` to the CIDRs of `$SUBNET_ONE`/`$SUBNET_TWO` from
-step 4 — **not** `--client-cidr-block` from step 3 (traffic reaching the
-VPC arrives NAT'd to an address in the associated subnets, not the client's
-own address). Then follow the README to deploy the stack and reach the
-task at its stable DNS name.
-
-If `$SUBNET_ONE`/`$SUBNET_TWO` are also what you pass as the template's own
-`SubnetOne`/`SubnetTwo` (the natural choice, so the VPN's target-network
-association lines up with where the task actually runs), remember those
-subnets need their own path to the internet before the task will start at
-all — see the README's "Deploying" section on NAT gateway placement. That
-requirement is unrelated to anything set up in this file or to the Cloud Map
-DNS name the README describes later: it's `AssignPublicIp: DISABLED`
-starving the task of a way to pull its image from ECR, ship logs, or mount
-EFS, nothing to do with the VPN or service discovery. A NAT gateway (or VPC
-interface/gateway endpoints for `ecr.api`/`ecr.dkr`/`logs`/
-`elasticfilesystem`) fixes it either way.
+With the VPN connected, browse `http://mixer.mixer-${Env}.internal:8000/` —
+see the README's "Reaching the service" section. Nothing left to configure
+on the mixer stack's side: the security group already trusts
+`$SUBNET_ONE`/`$SUBNET_TWO`'s own CIDR blocks (it's the same VPC the stack
+created them in), and the NAT Gateway that gives the task its own egress
+for ECR/logs/EFS was created by the stack too, not something to set up
+separately here.
 
 ## Troubleshooting
 
 **DNS resolution fails** (`http://mixer.mixer-${Env}.internal:8000/` gives
-"could not resolve host", but the task is reachable by raw IP — see below).
+"could not resolve host", but the task is reachable by raw IP) even though
+the endpoint was created with `--dns-servers "$RESOLVER_IP"` in step 3 — the
+most common cause on macOS is another VPN-like tool (Tailscale with
+MagicDNS is a common one) claiming the machine's global/unscoped DNS
+resolver slot, so the Client VPN's pushed DNS server never gets consulted.
+See [`../ecs-fargate-client-vpn/client-vpn-setup.md`](../ecs-fargate-client-vpn/client-vpn-setup.md)'s
+"Troubleshooting" section for the full explanation and the `scutil --dns` /
+`/etc/resolver` fix — it applies here unchanged, just substitute this
+stack's own `$RESOLVER_IP` (`10.0.0.2` for the default `VpcCidr`,
+`10.0.0.0/16`) and `mixer-${Env}.internal` domain.
 
-- **`DnsServers` not set on the endpoint.** If you built the endpoint via
-  steps 1-6 above, this is already set correctly at creation time (step 3)
-  — skip ahead. If you're troubleshooting a pre-existing endpoint instead
-  (the scenario the base README's "Assumption" section describes), check
-  its current setting:
-  ```sh
-  aws ec2 describe-client-vpn-endpoints \
-    --client-vpn-endpoint-id <id> --query 'ClientVpnEndpoints[0].DnsServers'
-  ```
-  If it's empty, set it to the VPC's `.2` address (always the reserved
-  Amazon-provided DNS resolver, regardless of subnet):
-  ```sh
-  VPC_CIDR=$(aws ec2 describe-vpcs --vpc-ids <vpc-id> --query 'Vpcs[0].CidrBlock' --output text)
-  RESOLVER_IP=$(python3 -c "import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1]).network_address + 2)" "$VPC_CIDR")
-  aws ec2 modify-client-vpn-endpoint \
-    --client-vpn-endpoint-id <id> \
-    --dns-servers CustomDnsServers="$RESOLVER_IP",Enabled=true
-  ```
-  Clients must disconnect and reconnect afterward — DNS servers are pushed
-  at connection time.
-
-- **Another tool has claimed your Mac's global DNS resolver slot** even
-  though `DnsServers` is confirmed correct on the endpoint (Tailscale with
-  MagicDNS is a common one) — it can keep the Client VPN's pushed DNS
-  server from ever being consulted. Run `scutil --dns` while connected: if
-  the VPC resolver IP is missing entirely and some other tool's DNS server
-  is the only unscoped resolver, add an explicit domain-scoped resolver
-  instead of relying on the pushed one (this takes precedence over an
-  unscoped catch-all resolver for matching queries, and doesn't require
-  changing the other tool's config):
-  ```sh
-  sudo mkdir -p /etc/resolver
-  echo "nameserver <vpc-resolver-ip>" | sudo tee /etc/resolver/mixer-<env>.internal
-  sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
-  ```
-  This file is static and persists after disconnecting the VPN, so lookups
-  for that domain will hang/fail while disconnected — remove it
-  (`sudo rm /etc/resolver/mixer-<env>.internal`) once you're done testing.
-
-- **Still stuck?** Fall back to the raw task IP to rule out DNS entirely:
-  ```sh
-  TASK_ARN=$(aws ecs list-tasks --cluster agents-cluster --service-name agent-server-dev --query 'taskArns[0]' --output text)
-  ENI_ID=$(aws ecs describe-tasks --cluster agents-cluster --tasks "$TASK_ARN" \
-    --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' --output text)
-  TASK_IP=$(aws ec2 describe-network-interfaces --network-interface-ids "$ENI_ID" \
-    --query 'NetworkInterfaces[0].PrivateIpAddress' --output text)
-  ```
-
-**Connection hangs rather than being actively refused** (DNS resolves fine,
-or you're testing by IP): double check `ClientVpnTargetSubnetCidrOne`/`Two`
-in the stack's parameters — they need to be the CIDRs of the subnets the
-Client VPN endpoint is *associated* with (step 4 above), not the VPN's own
-client CIDR block from step 3.
+**Connection hangs rather than being actively refused**: double check that
+`$SUBNET_ONE`/`$SUBNET_TWO` (step 4, this stack's own `SubnetOneId`/
+`SubnetTwoId` Outputs) are the subnets actually associated with the Client
+VPN endpoint — not the VPN's own client CIDR block from step 3.
 
 ## Tearing down
 
@@ -272,3 +235,6 @@ aws acm delete-certificate --certificate-arn "$CA_CERT_ARN"
 
 Client VPN bills per association-hour and per connection-hour even when
 idle, so don't leave a test endpoint associated longer than you need it.
+Do this before deleting the mixer stack itself — CloudFormation can't
+delete the VPC while a Client VPN endpoint is still associated with one of
+its subnets.
