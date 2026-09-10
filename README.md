@@ -33,7 +33,7 @@ Services environment.
 
 ## Example configurations
 
-Here are four example deployment configurations; which is most useful will
+Here are five example deployment configurations; which is most useful will
 depend on your existing infrastructure. ECS is the simplest to get up and
 running and requires the fewest prerequisites and configuration.
 
@@ -52,6 +52,15 @@ deployment, configured for the more typical customer shape: internal users
 reaching the server through an existing AWS Client VPN into the VPC, rather
 than a public IP or an ad hoc tunnel. It also documents how to stand up a
 Client VPN endpoint from scratch in a test account.
+
+[ecs-fargate-vpn-plus-alb](ecs-fargate-vpn-plus-alb/README.md) is the same
+ECS deployment reachable two ways at once: an AWS Client VPN for normal use,
+plus a public Application Load Balancer that exposes a small, explicit set
+of URL paths (webhooks, an OAuth callback, etc.) to callers that can't be on
+the VPN. Unlike `ecs-fargate-client-vpn`, it creates its own VPC, plus a
+public Route 53 hosted zone and DNS-validated ACM certificate, so it's
+self-contained aside from delegating a subdomain's NS records and configuring
+the VPN itself.
 
 [eks-full](eks-full/README.md) provides a complete EKS example configuration,
 including a load balancer, cluster definition, load balancer, ingress rules,
