@@ -20,7 +20,7 @@
       "Resource": "*"
     },
     {
-      "Sid": "AcmCertificateForPublicSubdomain",
+      "Sid": "AcmCertificatesForPublicAndInternalSubdomains",
       "Effect": "Allow",
       "Action": [
         "acm:RequestCertificate",

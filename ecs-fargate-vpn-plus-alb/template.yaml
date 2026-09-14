@@ -1,18 +1,20 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Runs the "mixer" server on ECS Fargate, reachable two ways at once: private
-  Client VPN access for normal use, plus a public Application Load Balancer
-  that exposes only specific, named URL paths (webhooks, an OAuth callback,
-  etc.) to the internet for callers that can't be on the VPN. Unlike
-  ../ecs-fargate-client-vpn, this stack creates its own VPC from scratch —
-  a public and private subnet pair in each of two AZs, an Internet Gateway,
-  a NAT Gateway, and matching route tables — rather than assuming one
-  already exists, so there's no way to end up with the ALB and the task in
-  AZs that don't line up. It also creates a public Route 53 hosted zone and
-  DNS-validated ACM certificate for a subdomain you own, so the whole thing
-  is self-contained beyond delegating that subdomain's NS records and
-  pointing a Client VPN endpoint at the VPC this stack creates — see the
-  README.
+  Client VPN access for normal use over TLS (terminated on an internal ALB,
+  with a publicly-trusted ACM cert for a private "internal." sub-subdomain
+  of SubdomainName), plus a public Application Load Balancer that exposes
+  only specific, named URL
+  paths (webhooks, an OAuth callback, etc.) to the internet for callers that
+  can't be on the VPN. Unlike ../ecs-fargate-client-vpn, this stack creates
+  its own VPC from scratch — a public and private subnet pair in each of two
+  AZs, an Internet Gateway, a NAT Gateway, and matching route tables —
+  rather than assuming one already exists, so there's no way to end up with
+  the ALB and the task in AZs that don't line up. It also creates a public
+  Route 53 hosted zone and DNS-validated ACM certificate for a subdomain you
+  own, so the whole thing is self-contained beyond delegating that
+  subdomain's NS records and pointing a Client VPN endpoint at the VPC this
+  stack creates — see the README.
 
 Parameters:
   Env:
@@ -297,22 +299,17 @@ Resources:
         - IpProtocol: tcp
           FromPort: !Ref ContainerPort
           ToPort: !Ref ContainerPort
-          CidrIp: !GetAtt SubnetOne.CidrBlock
+          SourceSecurityGroupId: !Ref InternalAlbSecurityGroup
           Description: >-
-            Client VPN traffic arrives NATed to an address in whichever
-            subnet the endpoint is associated with - point that
-            association at SubnetOne/SubnetTwo (see the README) so this
-            matches, instead of a separately-tracked CIDR parameter.
-        - IpProtocol: tcp
-          FromPort: !Ref ContainerPort
-          ToPort: !Ref ContainerPort
-          CidrIp: !GetAtt SubnetTwo.CidrBlock
+            Client VPN users - via the internal ALBs TLS listener only,
+            not a direct plaintext path. See the README section on TLS
+            for Client VPN users.
         - IpProtocol: tcp
           FromPort: !Ref ContainerPort
           ToPort: !Ref ContainerPort
           SourceSecurityGroupId: !Ref AlbSecurityGroup
           Description: >-
-            Only the ALB, not the internet directly - the ALB listener
+            Only the public ALB, not the internet directly - its listener
             rules are what actually restrict this to specific paths.
       SecurityGroupEgress:
         - IpProtocol: "-1"
@@ -333,6 +330,38 @@ Resources:
           ToPort: 80
           CidrIp: 0.0.0.0/0
           Description: Redirected straight to 443 by the listener below, never forwarded to the task.
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  InternalAlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "mixer-${Env} internal ALB (Client VPN, TLS)"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !GetAtt SubnetOne.CidrBlock
+          Description: >-
+            Client VPN traffic arrives NATed to an address in whichever
+            subnet the endpoint is associated with - point that
+            association at SubnetOne/SubnetTwo (see the README) so this
+            matches, instead of a separately-tracked CIDR parameter.
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !GetAtt SubnetTwo.CidrBlock
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !GetAtt SubnetOne.CidrBlock
+          Description: Redirected straight to 443 by the listener below, never forwarded to the task.
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !GetAtt SubnetTwo.CidrBlock
       SecurityGroupEgress:
         - IpProtocol: "-1"
           CidrIp: 0.0.0.0/0
@@ -393,25 +422,51 @@ Resources:
         - Key: Name
           Value: !Sub "agent-db-${Env}"
 
-  # ---------- Service discovery (stable DNS name for the task) ----------
-  ServiceDiscoveryNamespace:
-    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+  # ---------- Private DNS + TLS for Client VPN users ----------
+  # internal.${SubdomainName} is a sub-subdomain of the public name this
+  # stack already owns, not a separate domain - so proving control of it for
+  # ACM DNS validation just means writing a record into PublicHostedZone
+  # below (no separate delegation needed), while actual resolution of the
+  # name only ever happens inside this VPC, via InternalHostedZone. Naming
+  # it as a distinct sub-subdomain (rather than reusing SubdomainName
+  # verbatim as the private zone's name too) matters: a private hosted zone
+  # whose name exactly matches a public one would shadow *all* of the public
+  # zone's records for anything resolving inside this VPC, not just the one
+  # name meant to be private.
+  InternalHostedZone:
+    Type: AWS::Route53::HostedZone
     Properties:
-      Name: !Sub "mixer-${Env}.internal"
-      Vpc: !Ref Vpc
+      Name: !Sub "internal.${SubdomainName}"
+      VPCs:
+        - VPCId: !Ref Vpc
+          VPCRegion: !Ref "AWS::Region"
+      HostedZoneTags:
+        - Key: Name
+          Value: !Sub "mixer-${Env} internal"
 
-  ServiceDiscoveryService:
-    Type: AWS::ServiceDiscovery::Service
+  InternalCertificate:
+    Type: AWS::CertificateManager::Certificate
     Properties:
-      Name: mixer
-      NamespaceId: !Ref ServiceDiscoveryNamespace
-      DnsConfig:
-        DnsRecords:
-          - Type: A
-            TTL: 10
-        RoutingPolicy: MULTIVALUE
-      HealthCheckCustomConfig:
-        FailureThreshold: 1
+      DomainName: !Sub "internal.${SubdomainName}"
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Sub "internal.${SubdomainName}"
+          # The PUBLIC zone, deliberately - DNS validation proves you
+          # control the name via the real, delegated DNS tree.
+          # InternalHostedZone is never consulted for validation; it only
+          # answers queries made from inside this VPC.
+          HostedZoneId: !Ref PublicHostedZone
+
+  InternalDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref InternalHostedZone
+      Name: !Sub "internal.${SubdomainName}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt InternalLoadBalancer.DNSName
+        HostedZoneId: !GetAtt InternalLoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: true
 
   # ---------- Public DNS + TLS for the subdomain this stack owns ----------
   # Creating the zone is near-instant; ACM's DNS validation below is what
@@ -538,6 +593,65 @@ Resources:
       Actions:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
+
+  # ---------- Internal ALB: TLS for Client VPN users ----------
+  # Its own TargetGroup, not a shared one with the public ALB - AWS refuses
+  # to attach the same target group to listeners on two different load
+  # balancers (ServiceLimitExceeded: "target groups cannot be associated
+  # with more than one load balancer"). ECS supports registering a service
+  # with more than one target group for exactly this shape (same
+  # container/port, one target group per load balancer) - see
+  # Service.LoadBalancers below. Full access to everything the app serves,
+  # unlike the public ALB - there's no need for path-restricted
+  # ListenerRules here, since reaching this ALB at all already means being
+  # on the VPN.
+  InternalTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "mixer-${Env}-internal"
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: !Ref ContainerPort
+      TargetType: ip
+      HealthCheckPath: !Ref ExposedHealthCheckPath
+      HealthCheckProtocol: HTTP
+
+  InternalLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "mixer-${Env}-internal"
+      Scheme: internal
+      Type: application
+      Subnets:
+        - !Ref SubnetOne
+        - !Ref SubnetTwo
+      SecurityGroups:
+        - !Ref InternalAlbSecurityGroup
+
+  InternalHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref InternalLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+
+  InternalHttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref InternalLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref InternalCertificate
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref InternalTargetGroup
 
   # ---------- Logs ----------
   LogGroup:
@@ -666,9 +780,11 @@ Resources:
       - EfsMountTargetOne
       - EfsMountTargetTwo
       # ECS refuses to register targets on a target group that isn't yet
-      # attached to a listener — this dependency isn't implied just by
-      # !Ref TargetGroup below, so it has to be explicit.
+      # attached to a listener - this dependency isn't implied just by the
+      # !Ref TargetGroup/!Ref InternalTargetGroup below, so it has to be
+      # explicit for both.
       - HttpsListener
+      - InternalHttpsListener
     Properties:
       ServiceName: !Sub "agent-server-${Env}"
       Cluster: !Ref Cluster
@@ -690,12 +806,18 @@ Resources:
             - !Ref SubnetTwo
           SecurityGroups:
             - !Ref ServiceSecurityGroup
+      # Two entries, same container/port, one target group per ALB - ECS
+      # supports registering a service with more than one target group as
+      # long as they all point at the same container and port; see the
+      # comment on InternalTargetGroup above for why this can't instead be
+      # one target group shared by both ALBs.
       LoadBalancers:
         - ContainerName: mixer
           ContainerPort: !Ref ContainerPort
           TargetGroupArn: !Ref TargetGroup
-      ServiceRegistries:
-        - RegistryArn: !GetAtt ServiceDiscoveryService.Arn
+        - ContainerName: mixer
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref InternalTargetGroup
 
 Outputs:
   VpcId:
@@ -726,9 +848,17 @@ Outputs:
     Value: !Ref AgentDbAccessPoint
   LogGroupName:
     Value: !Ref LogGroup
-  ServiceDnsName:
-    Description: Stable DNS name for the task, resolvable from within the VPC (and Client VPN clients using its DNS resolver).
-    Value: !Sub "mixer.mixer-${Env}.internal"
+  InternalServiceUrl:
+    Description: >-
+      HTTPS entry point for Client VPN users, resolvable only from within
+      this VPC (Client VPN clients included, once connected and using its
+      pushed DNS resolver) - see the README's "TLS for VPN clients" section.
+    Value: !Sub "https://internal.${SubdomainName}"
+  InternalHostedZoneId:
+    Description: Private hosted zone for the "internal." sub-subdomain of SubdomainName, associated with this stack's VPC.
+    Value: !Ref InternalHostedZone
+  InternalLoadBalancerDnsName:
+    Value: !GetAtt InternalLoadBalancer.DNSName
   PublicHostedZoneId:
     Description: >-
       Hosted zone ID for SubdomainName. Look up its NS records with `aws

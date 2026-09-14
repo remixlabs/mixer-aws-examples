@@ -92,17 +92,6 @@
       }
     },
     {
-      "Sid": "ServiceDiscoveryServiceLinkedRole",
-      "Effect": "Allow",
-      "Action": "iam:CreateServiceLinkedRole",
-      "Resource": "arn:aws:iam::*:role/aws-service-role/servicediscovery.amazonaws.com/AWSServiceRoleForServiceDiscovery",
-      "Condition": {
-        "StringEquals": {
-          "iam:AWSServiceName": "servicediscovery.amazonaws.com"
-        }
-      }
-    },
-    {
       "Sid": "EcsClusterTaskAndService",
       "Effect": "Allow",
       "Action": [
@@ -123,7 +112,7 @@
       "Resource": "*"
     },
     {
-      "Sid": "Route53ForServiceDiscoveryPrivateZone",
+      "Sid": "Route53ForInternalPrivateZone",
       "Effect": "Allow",
       "Action": [
         "route53:CreateHostedZone",
@@ -138,24 +127,6 @@
         "route53:ListTagsForResource",
         "route53:AssociateVPCWithHostedZone",
         "route53:DisassociateVPCFromHostedZone"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "ServiceDiscoveryForStableDns",
-      "Effect": "Allow",
-      "Action": [
-        "servicediscovery:CreatePrivateDnsNamespace",
-        "servicediscovery:DeleteNamespace",
-        "servicediscovery:GetNamespace",
-        "servicediscovery:ListNamespaces",
-        "servicediscovery:GetOperation",
-        "servicediscovery:CreateService",
-        "servicediscovery:DeleteService",
-        "servicediscovery:GetService",
-        "servicediscovery:ListServices",
-        "servicediscovery:TagResource",
-        "servicediscovery:UntagResource"
       ],
       "Resource": "*"
     },

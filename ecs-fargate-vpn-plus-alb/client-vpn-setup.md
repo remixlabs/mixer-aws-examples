@@ -21,6 +21,8 @@ SUBNET_ONE=$(aws cloudformation describe-stacks --stack-name mixer-dev \
   --query 'Stacks[0].Outputs[?OutputKey==`SubnetOneId`].OutputValue' --output text)
 SUBNET_TWO=$(aws cloudformation describe-stacks --stack-name mixer-dev \
   --query 'Stacks[0].Outputs[?OutputKey==`SubnetTwoId`].OutputValue' --output text)
+INTERNAL_SERVICE_URL=$(aws cloudformation describe-stacks --stack-name mixer-dev \
+  --query 'Stacks[0].Outputs[?OutputKey==`InternalServiceUrl`].OutputValue' --output text)
 ```
 
 This is a one-time, admin-run setup — a different persona and a different,
@@ -90,11 +92,12 @@ CA_CERT_ARN=$(aws acm import-certificate \
 VPC_CIDR=$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" --query 'Vpcs[0].CidrBlock' --output text)
 # .2 of the VPC's own CIDR is always the reserved Amazon-provided DNS
 # resolver address. Passing it as --dns-servers is what lets connected
-# clients resolve private DNS names in this VPC — e.g. the Cloud Map/Route 53
-# private hosted zone template.yaml creates for the mixer service (see the
-# README's "Reaching the service"). Without it, each client just keeps
-# using its own pre-existing DNS server, which has no idea these private
-# names exist.
+# clients resolve private DNS names in this VPC — specifically
+# InternalHostedZone, the private Route 53 zone template.yaml creates for
+# internal.${SubdomainName} (see the README's "TLS for VPN clients" and
+# "Reaching the service" sections). Without it, each client just keeps
+# using its own pre-existing DNS server, which has no idea this private
+# name exists.
 RESOLVER_IP=$(python3 -c "import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1]).network_address + 2)" "$VPC_CIDR")
 
 CLIENT_VPN_ID=$(aws ec2 create-client-vpn-endpoint \
@@ -134,9 +137,11 @@ It's a one-time cost per account; harmless to leave granted after.
 
 Associate with `$SUBNET_ONE`/`$SUBNET_TWO` — the mixer stack's own private
 subnets, from its `SubnetOneId`/`SubnetTwoId` Outputs. This is also what
-`ServiceSecurityGroup` in `template.yaml` already trusts by CIDR block
-directly (see its ingress rule descriptions), so associating here is all
-that's needed — there's no separate parameter to go back and set
+`InternalAlbSecurityGroup` in `template.yaml` already trusts by CIDR block
+directly (see its ingress rule descriptions) — `InternalAlbSecurityGroup`
+fronts `InternalLoadBalancer`, the TLS entry point VPN clients actually
+connect to (see the README's "TLS for VPN clients"). So associating here is
+all that's needed — there's no separate parameter to go back and set
 afterward, unlike the plain `ecs-fargate-client-vpn` example where the VPC
 already existed and the CIDRs had to be looked up and fed back in:
 
@@ -197,27 +202,38 @@ OpenVPN Connect — it's a standard OpenVPN profile) and connect.
 
 ## 7. Verify
 
-With the VPN connected, browse `http://mixer.mixer-${Env}.internal:8000/` —
-see the README's "Reaching the service" section. Nothing left to configure
-on the mixer stack's side: the security group already trusts
-`$SUBNET_ONE`/`$SUBNET_TWO`'s own CIDR blocks (it's the same VPC the stack
-created them in), and the NAT Gateway that gives the task its own egress
-for ECR/logs/EFS was created by the stack too, not something to set up
-separately here.
+With the VPN connected, browse `$INTERNAL_SERVICE_URL` (i.e.
+`https://internal.${SubdomainName}/`) — see the README's "Reaching the
+service" section. This should be a normal, publicly-trusted TLS
+connection; no cert warnings or manual trust steps. Nothing left to
+configure on the mixer stack's side: `InternalAlbSecurityGroup` already
+trusts `$SUBNET_ONE`/`$SUBNET_TWO`'s own CIDR blocks (it's the same VPC the
+stack created them in), and the NAT Gateway that gives the task its own
+egress for ECR/logs/EFS was created by the stack too, not something to set
+up separately here.
 
 ## Troubleshooting
 
-**DNS resolution fails** (`http://mixer.mixer-${Env}.internal:8000/` gives
-"could not resolve host", but the task is reachable by raw IP) even though
-the endpoint was created with `--dns-servers "$RESOLVER_IP"` in step 3 — the
-most common cause on macOS is another VPN-like tool (Tailscale with
-MagicDNS is a common one) claiming the machine's global/unscoped DNS
-resolver slot, so the Client VPN's pushed DNS server never gets consulted.
-See [`../ecs-fargate-client-vpn/client-vpn-setup.md`](../ecs-fargate-client-vpn/client-vpn-setup.md)'s
+**DNS resolution fails** (`https://internal.${SubdomainName}/` gives
+"could not resolve host", but `InternalLoadBalancerDnsName` is reachable by
+its own AWS-assigned name) even though the endpoint was created with
+`--dns-servers "$RESOLVER_IP"` in step 3 — the most common cause on macOS is
+another VPN-like tool (Tailscale with MagicDNS is a common one) claiming the
+machine's global/unscoped DNS resolver slot, so the Client VPN's pushed DNS
+server never gets consulted. See
+[`../ecs-fargate-client-vpn/client-vpn-setup.md`](../ecs-fargate-client-vpn/client-vpn-setup.md)'s
 "Troubleshooting" section for the full explanation and the `scutil --dns` /
 `/etc/resolver` fix — it applies here unchanged, just substitute this
 stack's own `$RESOLVER_IP` (`10.0.0.2` for the default `VpcCidr`,
-`10.0.0.0/16`) and `mixer-${Env}.internal` domain.
+`10.0.0.0/16`) and `internal.${SubdomainName}` domain.
+
+**TLS handshake fails or the cert doesn't validate**: check that
+`InternalCertificate` actually reached `ISSUED` (`aws acm describe-certificate
+--certificate-arn <arn> --query Certificate.Status`) — like `Certificate`,
+it validates against `PublicHostedZone` and so is blocked by the same NS
+delegation the main README's "Deploying" section walks through. A cert
+stuck in `PENDING_VALIDATION` means the internal ALB's listener never
+finished creating either.
 
 **Connection hangs rather than being actively refused**: double check that
 `$SUBNET_ONE`/`$SUBNET_TWO` (step 4, this stack's own `SubnetOneId`/
