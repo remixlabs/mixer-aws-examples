@@ -84,6 +84,13 @@ out. Use a separate route table for `SubnetOne`/`SubnetTwo` pointing at the
 NAT gateway, and leave the NAT gateway's own subnet on the original
 IGW-routed table.
 
+## Persistent signing key
+
+Same as the base example: generate the key into Secrets Manager and pass the
+secret's ARN as the optional `ServerKeySecretArn` parameter. See
+[Persistent signing key](../ecs-fargate/README.md#persistent-signing-key)
+in the `ecs-fargate` README for the command and the details.
+
 ## Reaching the service
 
 1. Connect to the Client VPN (AWS-provided VPN client, Tunnelblick, OpenVPN

@@ -225,6 +225,13 @@ simpler when you don't mind the wait.
 Once `CREATE_COMPLETE`, follow [`client-vpn-setup.md`](client-vpn-setup.md)
 to stand up the Client VPN endpoint against this stack's own VPC.
 
+## Persistent signing key
+
+Same as the base example: generate the key into Secrets Manager and pass the
+secret's ARN as the optional `ServerKeySecretArn` parameter. See
+[Persistent signing key](../ecs-fargate/README.md#persistent-signing-key)
+in the `ecs-fargate` README for the command and the details.
+
 ## Reaching the service
 
 - **Via VPN**: connect to the Client VPN (see `client-vpn-setup.md`),

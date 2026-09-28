@@ -56,6 +56,13 @@ spec:
               value: {{ .Values.host }}
             - name: RUST_LOG
               value: {{ .Values.log_level }}
+            {{- if .Values.server_key_secret }}
+            - name: MIXER_SERVER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.server_key_secret }}
+                  key: MIXER_SERVER_KEY
+            {{- end }}
       volumes:
         - name: agent-db-{{ .Values.env }}
           persistentVolumeClaim:

@@ -27,6 +27,13 @@ auth_public_key_endpoint: "https://api.descope.com/v2/keys/P2k6P6vNwkCobWdchjV56
 agent_cache_size: "1GiB"
 agent_params_limit: "10MiB"
 
+# Optional: name of a pre-created Kubernetes Secret (in the release namespace)
+# whose MIXER_SERVER_KEY entry holds the server's persistent signing key, a
+# base64-encoded P-256 private key in PEM format. Create it out of band - see
+# the README - so the key never lives in this file. Leave empty to let the
+# server generate a new key on every start.
+server_key_secret: ""
+
 # adjust as needed
 volume_size: "200Gi"
 log_level: "info"

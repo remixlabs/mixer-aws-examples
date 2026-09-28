@@ -97,6 +97,18 @@ Parameters:
     Type: Number
     Default: 30
 
+  ServerKeySecretArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional ARN of a Secrets Manager secret holding the server's persistent
+      signing key (a base64-encoded P-256 private key in PEM format), injected
+      as MIXER_SERVER_KEY. Create the secret out of band - see the README.
+      Leave empty to let the server generate a new key on every start.
+
+Conditions:
+  HasServerKey: !Not [!Equals [!Ref ServerKeySecretArn, ""]]
+
 Resources:
   # ---------- Networking ----------
   ServiceSecurityGroup:
@@ -190,6 +202,18 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      # The execution role (not the task role) is what fetches container
+      # Secrets at launch, so the read grant for the signing key goes here.
+      Policies: !If
+        - HasServerKey
+        - - PolicyName: read-server-key
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !Ref ServerKeySecretArn
+        - !Ref AWS::NoValue
 
   TaskRole:
     Type: AWS::IAM::Role
@@ -272,6 +296,13 @@ Resources:
               Value: !Ref Host
             - Name: RUST_LOG
               Value: !Ref LogLevel
+          # Resolved by ECS at task launch; only the ARN is stored in the
+          # task definition, never the key itself.
+          Secrets: !If
+            - HasServerKey
+            - - Name: MIXER_SERVER_KEY
+                ValueFrom: !Ref ServerKeySecretArn
+            - !Ref AWS::NoValue
           MountPoints:
             - SourceVolume: agent-db
               ContainerPath: /dbs

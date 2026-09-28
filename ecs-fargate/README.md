@@ -71,6 +71,52 @@ This setup assumes the chosen subnets can reach ECR, CloudWatch Logs, and EFS
 `ecr.api`/`ecr.dkr`/`logs`/`elasticfilesystem`, plus the `s3` gateway endpoint
 for image layers).
 
+## Persistent signing key
+
+By default the server generates a new signing key every time it starts, so
+anything it signed before a restart or redeploy stops validating. To keep
+the key stable, create it once in Secrets Manager and pass the secret's ARN
+as `ServerKeySecretArn`. ECS then injects it into the container as
+`MIXER_SERVER_KEY` at launch. The template and the task definition only
+contain the ARN, never the key.
+
+The key is a P-256 private key in PEM format, base64-encoded. Generate it
+and pipe it straight into Secrets Manager. That way it's never written to
+disk, never lands in shell history, and never shows up in a process
+listing:
+
+```sh
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+  | base64 | tr -d '\n' \
+  | aws secretsmanager create-secret \
+      --name mixer-dev/server-key \
+      --query ARN --output text \
+      --secret-string file:///dev/stdin
+```
+
+Add the printed ARN to your parameters file:
+
+```json
+  { "ParameterKey": "ServerKeySecretArn", "ParameterValue": "arn:aws:secretsmanager:us-east-1:123456789012:secret:mixer-dev/server-key-AbCdEf" },
+```
+
+Notes:
+
+- The secret lives outside the stack on purpose. Deleting or recreating the
+  stack doesn't touch it, so a rebuilt deployment keeps the same key.
+- When `ServerKeySecretArn` is set, the stack grants the task *execution*
+  role `secretsmanager:GetSecretValue` on that one secret, and nothing
+  else. If you encrypt the secret with a customer-managed KMS key instead
+  of the default `aws/secretsmanager` key, also give that role
+  `kms:Decrypt` on the KMS key.
+- The identity that creates the secret needs `secretsmanager:CreateSecret`.
+  That permission isn't in `admin-iam-policy.json`, because the stack itself
+  never calls it.
+- ECS reads the secret only when a task starts. If you rotate the key, run
+  `aws ecs update-service --force-new-deployment` to pick up the new value.
+- Anyone who can read the secret, or exec into the running container, can
+  get the key. Scope IAM access to both accordingly.
+
 ## Outputs
 
 `ClusterName`, `ServiceName`, `TaskDefinitionArn`, `EfsFileSystemId`,
