@@ -113,6 +113,13 @@ hit anything else connecting through the VPN), see
 [`client-vpn-setup.md`](client-vpn-setup.md)'s "Troubleshooting" section for
 how to check/fix that and other common pitfalls.
 
+## Deleting the stack
+
+As in the base example, the EFS filesystem is retained when the stack is
+deleted, and has daily automatic backups turned on. See
+[Deleting the stack](../ecs-fargate/README.md#deleting-the-stack) in the
+`ecs-fargate` README.
+
 ## Outputs
 
 `ClusterName`, `ServiceName`, `TaskDefinitionArn`, `EfsFileSystemId`,

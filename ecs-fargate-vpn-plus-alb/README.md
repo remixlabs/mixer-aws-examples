@@ -255,6 +255,13 @@ the ALB's default action. (There's no equivalent restriction on
 `InternalHttpsListener` — anything reaching it is already a VPN client with
 full access.)
 
+## Deleting the stack
+
+As in the base example, the EFS filesystem is retained when the stack is
+deleted, and has daily automatic backups turned on. See
+[Deleting the stack](../ecs-fargate/README.md#deleting-the-stack) in the
+`ecs-fargate` README.
+
 ## Outputs
 
 `ClusterName`, `ServiceName`, `TaskDefinitionArn`, `EfsFileSystemId`,

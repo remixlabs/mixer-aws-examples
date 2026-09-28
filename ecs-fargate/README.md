@@ -117,6 +117,28 @@ Notes:
 - Anyone who can read the secret, or exec into the running container, can
   get the key. Scope IAM access to both accordingly.
 
+## Deleting the stack
+
+The EFS filesystem holding the agent databases (`AgentDbFileSystem`) has
+`DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`. Deleting the
+stack, or a stack update that would replace the filesystem, leaves it
+behind with its data intact rather than destroying it. A new stack does
+*not* pick it up again: it creates a fresh, empty filesystem. To get rid of
+a retained filesystem (e.g. after a throwaway test), delete it yourself.
+It's tagged `Name=agent-db-${Env}`:
+
+```sh
+aws efs describe-file-systems \
+  --query "FileSystems[?Name=='agent-db-dev'].FileSystemId"
+aws efs delete-file-system --file-system-id fs-0123456789abcdef0
+```
+
+The filesystem also has EFS automatic backups turned on (`BackupPolicy`),
+so AWS Backup takes daily snapshots into the account's default EFS backup
+vault. These recovery points are kept independently of the filesystem, and
+by default for 35 days, so they remain after the filesystem is deleted.
+They're billed as AWS Backup storage.
+
 ## Outputs
 
 `ClusterName`, `ServiceName`, `TaskDefinitionArn`, `EfsFileSystemId`,

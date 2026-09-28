@@ -393,10 +393,19 @@ Resources:
           CidrIp: 0.0.0.0/0
 
   # ---------- Persistent volume (analogous to pvc.yaml's EBS PV/PVC) ----------
+  # Retained on stack delete (and on any update that would replace it), so
+  # the agent databases outlive the stack. A new stack creates a fresh,
+  # empty filesystem; the old one has to be cleaned up or restored by hand.
   AgentDbFileSystem:
     Type: AWS::EFS::FileSystem
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Encrypted: true
+      # Daily AWS Backup snapshots into the account's default EFS backup
+      # vault, independent of the filesystem's own lifecycle.
+      BackupPolicy:
+        Status: ENABLED
       FileSystemTags:
         - Key: Name
           Value: !Sub "agent-db-${Env}"

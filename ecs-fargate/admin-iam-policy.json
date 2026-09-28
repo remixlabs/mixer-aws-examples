@@ -109,6 +109,7 @@
         "elasticfilesystem:DescribeFileSystemPolicy",
         "elasticfilesystem:DescribeLifecycleConfiguration",
         "elasticfilesystem:DescribeBackupPolicy",
+        "elasticfilesystem:PutBackupPolicy",
         "elasticfilesystem:DescribeReplicationConfigurations",
         "elasticfilesystem:CreateMountTarget",
         "elasticfilesystem:DeleteMountTarget",
