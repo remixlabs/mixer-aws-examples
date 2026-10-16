@@ -7,8 +7,10 @@ The overall Remix platform documentation is on our [Notion
 page](https://curious-turnover-84b.notion.site). There is a page for this
 [service
 specifically](https://curious-turnover-84b.notion.site/Cloud-Agent-Server-1061d464528f80f18e46dd27895aeda2),
-but for API usage, the best thing is probably the [deployed Swagger
-docs](https://agt.remixlabs.com/v1/swagger/#/).
+including a
+[quickstart](https://curious-turnover-84b.notion.site/Self-host-Cloud-Agent-Server-Quickstart-3fb1d464528f80ed84bde83046eebf6d)
+for configuring a fresh server.  For API usage, the best thing is probably the
+[deployed Swagger docs](https://agt.remixlabs.com/v1/swagger/#/).
 
 ## Remix Server overview
 
@@ -90,7 +92,7 @@ admin overhead.
 The `mixer` Docker image is available in a private AWS ECR repository, at
 `250233190882.dkr.ecr.us-east-1.amazonaws.com/mixer`. There are amd64 and arm64
 versions available. Each has a series of releases tagged with a build number
-(current latest: `12350` and `12350-arm64`). You can configure the release to
+(current latest: `12645` and `12645-arm64`). You can configure the release to
 either pin to a particular build, or use the mutable `latest`/`latest-arm64`
 tags.
 
